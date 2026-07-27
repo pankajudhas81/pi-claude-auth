@@ -19,7 +19,7 @@ import {
 import { readAllClaudeAccounts, type ClaudeAccount } from "./keychain.ts"
 import { initLogger, log } from "./logger.ts"
 import { buildUserAgent } from "./signing.ts"
-import { injectBillingHeader } from "./transforms.ts"
+import { injectBillingHeader, sanitizeStrictToolSchemas } from "./transforms.ts"
 
 export {
     getCachedCredentials,
@@ -243,23 +243,43 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
         applyCredential(ctx)
     })
 
-    // Inject the Claude Code billing header so requests bill against the
-    // Claude Pro/Max subscription rather than pay-as-you-go API credits.
-    // pi's built-in Anthropic provider supplies the identity, betas, and
-    // user-agent for OAuth tokens but not this header.
+    // Rewrite the outgoing Anthropic payload:
+    //
+    // 1. Strip JSON Schema keywords that Anthropic's strict tool validator
+    //    rejects (e.g. `minimum`/`maximum` on an integer), which otherwise
+    //    fail the whole request with a 400 before it reaches the model.
+    // 2. Inject the Claude Code billing header so requests bill against the
+    //    Claude Pro/Max subscription rather than pay-as-you-go API credits.
+    //    pi's built-in Anthropic provider supplies the identity, betas, and
+    //    user-agent for OAuth tokens but not this header.
+    //
+    // Both transforms mutate the payload in place, so a single payload is
+    // returned when either applied.
     pi.on("before_provider_request", (event) => {
+        let payload: unknown
+
+        try {
+            const sanitized = sanitizeStrictToolSchemas(event.payload)
+            if (sanitized) payload = sanitized
+        } catch (err) {
+            log("tool_schema_sanitize_error", {
+                error: err instanceof Error ? err.message : String(err),
+            })
+        }
+
         try {
             const updated = injectBillingHeader(event.payload)
             if (updated) {
                 log("billing_header_injected", {})
-                return updated
+                payload = updated
             }
         } catch (err) {
             log("billing_header_error", {
                 error: err instanceof Error ? err.message : String(err),
             })
         }
-        return undefined
+
+        return payload
     })
 
     log("provider_registered", { provider: PROVIDER_ID })

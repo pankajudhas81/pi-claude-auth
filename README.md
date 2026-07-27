@@ -164,15 +164,46 @@ one account is found, the picker is skipped.
 
 ## Troubleshooting
 
-| Problem                            | Solution                                                                                                         |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| "No Claude Code credentials found" | Run `claude` to authenticate with Claude Code first                                                              |
-| "Keychain is locked"               | Run `security unlock-keychain ~/Library/Keychains/login.keychain-db`                                             |
-| "Token expired and refresh failed" | The extension runs the `claude` CLI to refresh automatically. If this fails, re-authenticate by running `claude` |
-| Not working on Linux/Windows       | Ensure `~/.claude/.credentials.json` exists. Run `claude` to create it                                           |
-| Keychain access denied             | Grant access when macOS prompts you                                                                              |
-| Keychain read timed out            | Restart Keychain Access (can happen on macOS Tahoe)                                                              |
-| Package not updating               | Run `pi update npm:@pankajudhas81/pi-claude-auth`                                                                |
+| Problem                                 | Solution                                                                                                         |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| "No Claude Code credentials found"      | Run `claude` to authenticate with Claude Code first                                                              |
+| "Keychain is locked"                    | Run `security unlock-keychain ~/Library/Keychains/login.keychain-db`                                             |
+| "Token expired and refresh failed"      | The extension runs the `claude` CLI to refresh automatically. If this fails, re-authenticate by running `claude` |
+| Not working on Linux/Windows            | Ensure `~/.claude/.credentials.json` exists. Run `claude` to create it                                           |
+| Keychain access denied                  | Grant access when macOS prompts you                                                                              |
+| Keychain read timed out                 | Restart Keychain Access (can happen on macOS Tahoe)                                                              |
+| Package not updating                    | Run `pi update npm:@pankajudhas81/pi-claude-auth`                                                                |
+| `400 tools.N.custom: ... not supported` | Handled automatically — see [Strict tool schemas](#strict-tool-schemas)                                          |
+
+### Strict tool schemas
+
+When a pi tool opts into JSON-schema constrained sampling, pi marks it
+`strict: true` and forwards the tool's full JSON Schema. Anthropic's strict
+validator accepts only a subset of JSON Schema, so a single unsupported keyword
+rejects the whole request before it reaches the model:
+
+```
+400 tools.17.custom: For 'integer' type, properties maximum, minimum are not supported
+```
+
+The extension rewrites those schemas automatically — it strips the rejected
+keywords (`minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/`multipleOf`
+on numbers, `maxItems`/`uniqueItems` on arrays, `minProperties`/`maxProperties`
+on objects) and adds the required `additionalProperties: false`.
+
+Union-typed parameters (`type: ["string", "null"]` or `anyOf`) cannot be
+stripped, and Anthropic budgets them across all strict tools in a request
+because they cost exponential compile time. Tools carrying unions therefore give
+up `strict` rather than making every request pay that cost; they keep working,
+just without constrained sampling. To trade latency back for stricter
+validation, raise the budget (Anthropic's own ceiling is 16):
+
+```bash
+export PI_CLAUDE_AUTH_MAX_STRICT_UNIONS=4
+```
+
+Enable [diagnostic logging](#diagnostic-logging) to see which tools were
+rewritten — look for `tool_schema_sanitized`.
 
 ### Claude Code version pinning
 
@@ -229,11 +260,12 @@ write-back is enabled by default to keep your stored credentials valid.
 
 ## Environment variables
 
-| Variable                | Description                                                             | Default       |
-| ----------------------- | ----------------------------------------------------------------------- | ------------- |
-| `PI_CODING_AGENT_DIR`   | pi's config directory (where `auth.json` lives)                         | `~/.pi/agent` |
-| `PI_CLAUDE_AUTH_DEBUG`  | Enable diagnostic logging (`1` for default path, or a custom file path) | disabled      |
-| `ANTHROPIC_CLI_VERSION` | Claude CLI version for billing headers                                  | `2.1.160`     |
+| Variable                           | Description                                                                          | Default       |
+| ---------------------------------- | ------------------------------------------------------------------------------------ | ------------- |
+| `PI_CODING_AGENT_DIR`              | pi's config directory (where `auth.json` lives)                                      | `~/.pi/agent` |
+| `PI_CLAUDE_AUTH_DEBUG`             | Enable diagnostic logging (`1` for default path, or a custom file path)              | disabled      |
+| `ANTHROPIC_CLI_VERSION`            | Claude CLI version for billing headers                                               | `2.1.160`     |
+| `PI_CLAUDE_AUTH_MAX_STRICT_UNIONS` | Union-typed parameters allowed across strict tools ([details](#strict-tool-schemas)) | `0`           |
 
 ## How it works
 

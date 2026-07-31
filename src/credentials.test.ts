@@ -1,5 +1,11 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, test } from "node:test"
@@ -104,6 +110,40 @@ test("syncAuthJson: preserves other providers in auth.json", () => {
     }
     assert.equal(parsed.anthropic.access, "a2")
     assert.deepEqual(parsed.openai, { type: "api_key", key: "sk-test" })
+})
+
+test("syncAuthJson: skips the write when auth.json is malformed", () => {
+    const authPath = join(dir, "auth.json")
+    // Simulate a torn read: another process is mid-write.
+    const torn = '{ "openai-codex": { "type": "oauth", "acc'
+    writeFileSync(authPath, torn, "utf-8")
+    syncAuthJson({ accessToken: "a", refreshToken: "r", expiresAt: 1 })
+    // File must be left untouched, not rebuilt from scratch.
+    assert.equal(readFileSync(authPath, "utf-8"), torn)
+})
+
+test("syncAuthJson: no-op when the anthropic entry is already in sync", () => {
+    const authPath = join(dir, "auth.json")
+    const creds = { accessToken: "acc", refreshToken: "ref", expiresAt: 5 }
+    syncAuthJson(creds)
+    // Something else edits an unrelated provider between syncs. Written
+    // compact, so any rewrite (which pretty-prints) changes the bytes.
+    const parsed = JSON.parse(readFileSync(authPath, "utf-8")) as Record<
+        string,
+        unknown
+    >
+    parsed["openai-codex"] = { type: "oauth", access: "x" }
+    const compact = JSON.stringify(parsed)
+    writeFileSync(authPath, compact, "utf-8")
+    // A repeat sync with identical creds must not rewrite the file.
+    syncAuthJson(creds)
+    assert.equal(readFileSync(authPath, "utf-8"), compact)
+})
+
+test("syncAuthJson: leaves no temp files behind", () => {
+    syncAuthJson({ accessToken: "a", refreshToken: "r", expiresAt: 1 })
+    const leftovers = readdirSync(dir).filter((f) => f.endsWith(".tmp"))
+    assert.deepEqual(leftovers, [])
 })
 
 test("account source persistence round-trips", () => {

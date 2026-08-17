@@ -19,6 +19,85 @@ export interface ClaudeAccount {
 
 const PRIMARY_SERVICE = "Claude Code-credentials"
 
+// A Keychain service name is NOT unique. `security` allows several generic
+// password items to share one service as long as their account ("acct")
+// attribute differs, and Claude Code has written its credentials under
+// different account names over time (an older "default" and, currently, the
+// macOS username). That leaves two live items under the service
+// "Claude Code-credentials".
+//
+// `security find-generic-password -s <service> -w` returns only the FIRST
+// match, with no defined ordering between same-service items. When the item it
+// happens to return is a stale one, every read yields long-expired tokens and
+// pi fails with a 401 even though the user is properly logged in to Claude
+// Code. Identifying an item therefore requires the service AND the account.
+const SOURCE_SEPARATOR = "\u0001"
+
+export interface KeychainRef {
+    service: string
+    account?: string
+}
+
+/**
+ * Encodes a service/account pair into the opaque `source` string used to
+ * identify an account elsewhere in the extension.
+ */
+export function encodeSource(ref: KeychainRef): string {
+    return ref.account
+        ? `${ref.service}${SOURCE_SEPARATOR}${ref.account}`
+        : ref.service
+}
+
+/**
+ * Decodes a `source` string back into a service/account pair. Sources persisted
+ * by earlier versions contain no separator and decode to a service-only ref, so
+ * an existing `claude-account-source.txt` keeps working.
+ */
+export function decodeSource(source: string): KeychainRef {
+    const idx = source.indexOf(SOURCE_SEPARATOR)
+    if (idx === -1) return { service: source }
+    return { service: source.slice(0, idx), account: source.slice(idx + 1) }
+}
+
+/**
+ * Extracts every Claude Code credential item from `security dump-keychain`
+ * output, keyed by service and account.
+ *
+ * Exported for testing.
+ */
+export function parseKeychainDump(dump: string): KeychainRef[] {
+    // dump-keychain emits one record per item, each introduced by a
+    // "keychain: ..." header. Splitting on that header keeps an item's "acct"
+    // attribute associated with its own "svce", which is what makes multiple
+    // accounts under a single service name distinguishable.
+    const refs: KeychainRef[] = []
+    const seen = new Set<string>()
+
+    for (const record of dump.split(/^keychain: /m)) {
+        const svcMatch =
+            /"svce"<blob>="(Claude Code-credentials(?:-[0-9a-f]+)?)"/.exec(
+                record,
+            )
+        if (!svcMatch) continue
+        const acctMatch = /"acct"<blob>="([^"]*)"/.exec(record)
+        const ref: KeychainRef = {
+            service: svcMatch[1],
+            account: acctMatch ? acctMatch[1] : undefined,
+        }
+        const key = encodeSource(ref)
+        if (seen.has(key)) continue
+        seen.add(key)
+        refs.push(ref)
+    }
+
+    // Prefer the primary service so the canonical Claude Code entry remains the
+    // default account when several are present.
+    return [
+        ...refs.filter((r) => r.service === PRIMARY_SERVICE),
+        ...refs.filter((r) => r.service !== PRIMARY_SERVICE),
+    ]
+}
+
 function parseCredentials(raw: string): ClaudeCredentials | null {
     let parsed: unknown
     try {
@@ -74,16 +153,25 @@ function parseCredentials(raw: string): ClaudeCredentials | null {
     }
 }
 
-function readKeychainService(serviceName: string): string | null {
+function readKeychainService(ref: KeychainRef | string): string | null {
+    const target = typeof ref === "string" ? decodeSource(ref) : ref
+    const serviceName = target.service
+    const args = ["find-generic-password", "-s", serviceName]
+    // Without -a, `security` returns an arbitrary item among those sharing the
+    // service, which may be a stale credential.
+    if (target.account) args.push("-a", target.account)
+    args.push("-w")
     try {
-        const result = execSync(
-            `security find-generic-password -s "${serviceName}" -w`,
-            {
-                timeout: 2000,
-                encoding: "utf-8",
-            },
-        ).trim()
-        log("keychain_read", { service: serviceName, success: true })
+        const result = execFileSync("/usr/bin/security", args, {
+            timeout: 2000,
+            encoding: "utf-8",
+            stdio: ["pipe", "pipe", "pipe"],
+        }).trim()
+        log("keychain_read", {
+            service: serviceName,
+            account: target.account,
+            success: true,
+        })
         return result
     } catch (err: unknown) {
         const error = err as {
@@ -140,41 +228,23 @@ function readKeychainService(serviceName: string): string | null {
     }
 }
 
-function listClaudeKeychainServices(): string[] {
+function listClaudeKeychainRefs(): KeychainRef[] {
     try {
         const dump = execSync("security dump-keychain", {
             timeout: 5000,
             maxBuffer: 1024 * 1024 * 10, // 10 MB
             encoding: "utf-8",
         })
-
-        const services: string[] = []
-        const seen = new Set<string>()
-
-        const re = /"Claude Code-credentials(?:-[0-9a-f]+)?"/g
-        let m = re.exec(dump)
-        while (m !== null) {
-            const svc = m[0].slice(1, -1)
-            if (!seen.has(svc)) {
-                seen.add(svc)
-                services.push(svc)
-            }
-            m = re.exec(dump)
-        }
-
-        const ordered: string[] = []
-        if (seen.has(PRIMARY_SERVICE)) ordered.push(PRIMARY_SERVICE)
-        for (const svc of services) {
-            if (svc !== PRIMARY_SERVICE) ordered.push(svc)
-        }
-        log("keychain_list", { servicesFound: ordered })
-        return ordered
+        const refs = parseKeychainDump(dump)
+        if (refs.length === 0) return [{ service: PRIMARY_SERVICE }]
+        log("keychain_list", { servicesFound: refs.map(encodeSource) })
+        return refs
     } catch (err) {
         log("keychain_list", {
             error: "Failed to list keychain services",
             message: err instanceof Error ? err.message : String(err),
         })
-        return [PRIMARY_SERVICE]
+        return [{ service: PRIMARY_SERVICE }]
     }
 }
 
@@ -222,19 +292,26 @@ export function readAllClaudeAccounts(): ClaudeAccount[] {
         return [{ label, source: "file", credentials: creds }]
     }
 
-    const services = listClaudeKeychainServices()
+    const refs = listClaudeKeychainRefs()
     const rawAccounts: Array<{
         source: string
         credentials: ClaudeCredentials
     }> = []
 
-    for (const svc of services) {
-        const raw = readKeychainService(svc)
+    for (const ref of refs) {
+        const raw = readKeychainService(ref)
         if (!raw) continue
         const creds = parseCredentials(raw)
         if (!creds) continue
-        rawAccounts.push({ source: svc, credentials: creds })
+        rawAccounts.push({ source: encodeSource(ref), credentials: creds })
     }
+
+    // Several items can hold credentials for the same Claude account, one of
+    // them stale. Ordering by expiry makes the freshest the default account, so
+    // a leftover expired item can no longer shadow a valid login.
+    rawAccounts.sort(
+        (a, b) => b.credentials.expiresAt - a.credentials.expiresAt,
+    )
 
     if (rawAccounts.length === 0) {
         const creds = readCredentialsFile()
@@ -325,7 +402,8 @@ export function writeBackCredentials(
 
     if (process.platform === "darwin") {
         try {
-            const raw = readKeychainService(source)
+            const ref = decodeSource(source)
+            const raw = readKeychainService(ref)
             if (!raw) return false
             const updated = updateCredentialBlob(raw, newCreds)
             if (!updated) return false
@@ -333,13 +411,20 @@ export function writeBackCredentials(
             // entry. Claude CLI uses the macOS username (e.g. "gmartin"), not
             // the service name. Using the wrong account name creates a
             // duplicate entry instead of updating.
-            const accountName = getKeychainAccountName(source) ?? source
+            //
+            // When the source already carries an account name, use it verbatim:
+            // re-deriving it from the service alone would resolve to whichever
+            // item `security` returns first and could overwrite the wrong one.
+            const accountName =
+                ref.account ??
+                getKeychainAccountName(ref.service) ??
+                ref.service
             execFileSync(
                 "/usr/bin/security",
                 [
                     "add-generic-password",
                     "-s",
-                    source,
+                    ref.service,
                     "-a",
                     accountName,
                     "-w",
@@ -348,7 +433,7 @@ export function writeBackCredentials(
                 ],
                 { timeout: 2000, stdio: "ignore" },
             )
-            log("writeback_success", { source, accountName })
+            log("writeback_success", { service: ref.service, accountName })
             return true
         } catch {
             log("writeback_failed", { source })
@@ -363,7 +448,7 @@ export function refreshAccount(source: string): ClaudeCredentials | null {
     if (source === "file") {
         return readCredentialsFile()
     }
-    const raw = readKeychainService(source)
+    const raw = readKeychainService(decodeSource(source))
     if (!raw) return null
     return parseCredentials(raw)
 }

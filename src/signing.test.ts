@@ -62,8 +62,8 @@ test("computeCch: first 5 hex chars of sha256", () => {
 })
 
 test("computeVersionSuffix: is deterministic and 3 hex chars", () => {
-    const a = computeVersionSuffix("a message here", "2.1.160")
-    const b = computeVersionSuffix("a message here", "2.1.160")
+    const a = computeVersionSuffix("a message here", "2.1.258")
+    const b = computeVersionSuffix("a message here", "2.1.258")
     assert.equal(a, b)
     assert.match(a, /^[0-9a-f]{3}$/)
 })
@@ -71,12 +71,12 @@ test("computeVersionSuffix: is deterministic and 3 hex chars", () => {
 test("buildBillingHeaderValue: well-formed header", () => {
     const header = buildBillingHeaderValue(
         [{ role: "user", content: "hi there" }],
-        "2.1.160",
+        "2.1.258",
         "sdk-cli",
     )
     assert.match(
         header,
-        /^x-anthropic-billing-header: cc_version=2\.1\.160\.[0-9a-f]{3}; cc_entrypoint=sdk-cli; cch=[0-9a-f]{5};$/,
+        /^x-anthropic-billing-header: cc_version=2\.1\.258\.[0-9a-f]{3}; cc_entrypoint=sdk-cli; cch=[0-9a-f]{5};$/,
     )
 })
 
@@ -84,7 +84,7 @@ test("buildUserAgent: default Claude Code form", () => {
     delete process.env.ANTHROPIC_USER_AGENT
     delete process.env.ANTHROPIC_CLI_VERSION
     delete process.env.CLAUDE_CODE_ENTRYPOINT
-    assert.equal(buildUserAgent(), "claude-cli/2.1.160 (external, sdk-cli)")
+    assert.equal(buildUserAgent(), "claude-cli/2.1.258 (external, sdk-cli)")
 })
 
 test("buildUserAgent: honors version and entrypoint overrides", () => {

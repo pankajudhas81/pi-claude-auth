@@ -4,6 +4,8 @@ import {
     existsSync,
     mkdirSync,
     readFileSync,
+    renameSync,
+    rmSync,
     writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -96,29 +98,58 @@ function syncToPath(authPath: string, creds: ClaudeCredentials): void {
             try {
                 auth = JSON.parse(raw)
             } catch {
-                // Malformed file, start fresh
+                // Torn read from a concurrent writer. Rebuilding from {}
+                // would drop other providers' credentials; skip and retry
+                // on the next sync.
+                log("sync_auth_json_skipped", {
+                    path: authPath,
+                    reason: "malformed or partially written auth.json",
+                })
+                return
             }
         }
     }
     // pi persists OAuth credentials as `{ type: "oauth", access, refresh,
     // expires }` keyed by provider id. Seeding the `anthropic` entry lets pi
     // use the Claude Code credentials with no separate /login.
-    auth.anthropic = {
+    const entry = {
         type: "oauth",
         access: creds.accessToken,
         refresh: creds.refreshToken,
         expires: creds.expiresAt,
     }
+    const existing = auth.anthropic as Record<string, unknown> | undefined
+    if (
+        existing &&
+        existing.type === entry.type &&
+        existing.access === entry.access &&
+        existing.refresh === entry.refresh &&
+        existing.expires === entry.expires
+    ) {
+        return // unchanged; don't risk clobbering concurrent writers
+    }
+    auth.anthropic = entry
     const dir = dirname(authPath)
     if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true, mode: 0o700 })
     }
-    writeFileSync(authPath, JSON.stringify(auth, null, 2), {
-        encoding: "utf-8",
-        mode: 0o600,
-    })
-    if (process.platform !== "win32") {
-        chmodSync(authPath, 0o600)
+    // Atomic replace so readers never see a partial file.
+    const tmpPath = join(
+        dir,
+        `.auth.json.${process.pid}.${Date.now().toString(36)}.tmp`,
+    )
+    try {
+        writeFileSync(tmpPath, JSON.stringify(auth, null, 2), {
+            encoding: "utf-8",
+            mode: 0o600,
+        })
+        if (process.platform !== "win32") {
+            chmodSync(tmpPath, 0o600)
+        }
+        renameSync(tmpPath, authPath)
+    } catch (err) {
+        rmSync(tmpPath, { force: true })
+        throw err
     }
 }
 

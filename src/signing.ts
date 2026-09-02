@@ -7,7 +7,7 @@ const BILLING_SALT = "59cf53e54c78"
 // version for Anthropic's subscription-billing validation to route the request
 // to the Claude Pro/Max plan instead of pay-as-you-go / extra usage.
 // Overridable via ANTHROPIC_CLI_VERSION.
-export const CC_VERSION = "2.1.160"
+export const CC_VERSION = "2.1.258"
 
 // Billing entrypoint, mirrored in the user-agent's `(external, <entrypoint>)`
 // suffix. Overridable via CLAUDE_CODE_ENTRYPOINT.

@@ -176,7 +176,7 @@ one account is found, the picker is skipped.
 
 ### Claude Code version pinning
 
-The Claude Code version is pinned to `2.1.160` for billing header computation.
+The Claude Code version is pinned to `2.1.258` for billing header computation.
 If billing reverts to extra usage after a Claude Code update, override:
 
 ```bash
@@ -233,7 +233,7 @@ write-back is enabled by default to keep your stored credentials valid.
 | ----------------------- | ----------------------------------------------------------------------- | ------------- |
 | `PI_CODING_AGENT_DIR`   | pi's config directory (where `auth.json` lives)                         | `~/.pi/agent` |
 | `PI_CLAUDE_AUTH_DEBUG`  | Enable diagnostic logging (`1` for default path, or a custom file path) | disabled      |
-| `ANTHROPIC_CLI_VERSION` | Claude CLI version for billing headers                                  | `2.1.160`     |
+| `ANTHROPIC_CLI_VERSION` | Claude CLI version for billing headers                                  | `2.1.258`     |
 
 ## How it works
 

@@ -9,6 +9,12 @@ import {
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import {
+    AuthLockBusyError,
+    sleepSync,
+    withAuthLockSync,
+    writeFileAtomicSync,
+} from "./auth-lock.ts"
+import {
     readAllClaudeAccounts,
     refreshAccount,
     writeBackCredentials,
@@ -88,38 +94,77 @@ export function saveAccountSource(source: string): void {
     }
 }
 
+/**
+ * Thrown when auth.json exists but cannot be parsed. The sync is skipped
+ * rather than overwriting credentials we were unable to read: auth.json holds
+ * providers this extension does not manage (`openai-codex`, `openrouter`, …)
+ * and clobbering them logs those providers out for good.
+ */
+export class AuthFileUnreadableError extends Error {
+    constructor(path: string, reason: string) {
+        super(`Refusing to overwrite unreadable auth.json at ${path}: ${reason}`)
+        this.name = "AuthFileUnreadableError"
+    }
+}
+
+/**
+ * Read the existing auth.json. Call while holding the auth lock.
+ *
+ * An empty file is retried once: a concurrent writer that does not take the
+ * lock (an older copy of this extension, a third-party tool) can leave the
+ * file momentarily truncated.
+ */
+function readAuthFile(authPath: string): Record<string, unknown> {
+    if (!existsSync(authPath)) return {}
+
+    let raw = readFileSync(authPath, "utf-8").trim()
+    if (!raw) {
+        sleepSync(25)
+        raw = existsSync(authPath)
+            ? readFileSync(authPath, "utf-8").trim()
+            : ""
+    }
+    if (!raw) return {}
+
+    let parsed: unknown
+    try {
+        parsed = JSON.parse(raw)
+    } catch (err) {
+        throw new AuthFileUnreadableError(
+            authPath,
+            err instanceof Error ? err.message : String(err),
+        )
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new AuthFileUnreadableError(authPath, "expected a JSON object")
+    }
+    return parsed as Record<string, unknown>
+}
+
 function syncToPath(authPath: string, creds: ClaudeCredentials): void {
-    let auth: Record<string, unknown> = {}
-    if (existsSync(authPath)) {
-        const raw = readFileSync(authPath, "utf-8").trim()
-        if (raw) {
-            try {
-                auth = JSON.parse(raw)
-            } catch {
-                // Malformed file, start fresh
-            }
-        }
-    }
-    // pi persists OAuth credentials as `{ type: "oauth", access, refresh,
-    // expires }` keyed by provider id. Seeding the `anthropic` entry lets pi
-    // use the Claude Code credentials with no separate /login.
-    auth.anthropic = {
-        type: "oauth",
-        access: creds.accessToken,
-        refresh: creds.refreshToken,
-        expires: creds.expiresAt,
-    }
     const dir = dirname(authPath)
     if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true, mode: 0o700 })
     }
-    writeFileSync(authPath, JSON.stringify(auth, null, 2), {
-        encoding: "utf-8",
-        mode: 0o600,
+
+    // pi guards auth.json with a `<file>.lock` directory; take the same lock so
+    // this read-modify-write cannot interleave with pi's own.
+    withAuthLockSync(authPath, () => {
+        const auth = readAuthFile(authPath)
+        // pi persists OAuth credentials as `{ type: "oauth", access, refresh,
+        // expires }` keyed by provider id. Seeding the `anthropic` entry lets
+        // pi use the Claude Code credentials with no separate /login.
+        auth.anthropic = {
+            type: "oauth",
+            access: creds.accessToken,
+            refresh: creds.refreshToken,
+            expires: creds.expiresAt,
+        }
+        writeFileAtomicSync(authPath, JSON.stringify(auth, null, 2))
+        if (process.platform !== "win32") {
+            chmodSync(authPath, 0o600)
+        }
     })
-    if (process.platform !== "win32") {
-        chmodSync(authPath, 0o600)
-    }
 }
 
 export function syncAuthJson(creds: ClaudeCredentials): void {
@@ -128,11 +173,18 @@ export function syncAuthJson(creds: ClaudeCredentials): void {
         syncToPath(authPath, creds)
         log("sync_auth_json", { path: authPath, success: true })
     } catch (err) {
-        log("sync_auth_json", {
-            path: authPath,
-            success: false,
-            error: err instanceof Error ? err.message : String(err),
-        })
+        const error = err instanceof Error ? err.message : String(err)
+        // Lock contention and an unreadable file are both transient and
+        // recoverable: the caller re-syncs on the next interval tick. Skipping
+        // is strictly safer than overwriting other providers' credentials.
+        if (
+            err instanceof AuthLockBusyError ||
+            err instanceof AuthFileUnreadableError
+        ) {
+            log("sync_auth_json", { path: authPath, skipped: true, error })
+            return
+        }
+        log("sync_auth_json", { path: authPath, success: false, error })
         throw err
     }
 }

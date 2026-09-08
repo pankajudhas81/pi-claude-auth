@@ -1,5 +1,12 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readFileSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, test } from "node:test"
@@ -104,6 +111,56 @@ test("syncAuthJson: preserves other providers in auth.json", () => {
     }
     assert.equal(parsed.anthropic.access, "a2")
     assert.deepEqual(parsed.openai, { type: "api_key", key: "sk-test" })
+})
+
+test("syncAuthJson: skips the write when auth.json is unparseable", () => {
+    const authPath = join(dir, "auth.json")
+    // A torn read (pi truncates auth.json before rewriting it) must never be
+    // treated as "start fresh" -- that wipes every other provider.
+    writeFileSync(authPath, '{"openai-codex": {"type": "oau', "utf-8")
+    syncAuthJson({ accessToken: "a", refreshToken: "r", expiresAt: 1 })
+    assert.equal(
+        readFileSync(authPath, "utf-8"),
+        '{"openai-codex": {"type": "oau',
+    )
+})
+
+test("syncAuthJson: skips the write when a JSON array is stored", () => {
+    const authPath = join(dir, "auth.json")
+    writeFileSync(authPath, "[]", "utf-8")
+    syncAuthJson({ accessToken: "a", refreshToken: "r", expiresAt: 1 })
+    assert.equal(readFileSync(authPath, "utf-8"), "[]")
+})
+
+test("syncAuthJson: skips the write while pi holds the auth.json lock", () => {
+    const authPath = join(dir, "auth.json")
+    const stored = JSON.stringify({
+        "openai-codex": { type: "oauth", access: "c" },
+    })
+    writeFileSync(authPath, stored, "utf-8")
+    mkdirSync(`${authPath}.lock`)
+    try {
+        syncAuthJson({ accessToken: "a", refreshToken: "r", expiresAt: 1 })
+        assert.equal(readFileSync(authPath, "utf-8"), stored)
+    } finally {
+        rmSync(`${authPath}.lock`, { recursive: true, force: true })
+    }
+})
+
+test("syncAuthJson: takes and releases pi's auth.json lock", () => {
+    const authPath = join(dir, "auth.json")
+    syncAuthJson({ accessToken: "a", refreshToken: "r", expiresAt: 1 })
+    assert.equal(existsSync(`${authPath}.lock`), false)
+})
+
+test("syncAuthJson: recovers a momentarily empty auth.json", () => {
+    const authPath = join(dir, "auth.json")
+    writeFileSync(authPath, "", "utf-8")
+    syncAuthJson({ accessToken: "a", refreshToken: "r", expiresAt: 1 })
+    const parsed = JSON.parse(readFileSync(authPath, "utf-8")) as {
+        anthropic: { access: string }
+    }
+    assert.equal(parsed.anthropic.access, "a")
 })
 
 test("account source persistence round-trips", () => {

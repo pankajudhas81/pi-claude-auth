@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+- Stop destroying other providers' credentials in `auth.json`. The 5-minute
+  re-sync did an unlocked read-modify-write while pi truncates `auth.json`
+  before rewriting it, so a torn/empty read was treated as "start fresh" and
+  the file was rewritten with `anthropic` only — silently logging out
+  providers such as `openai-codex`. The sync now takes pi's own
+  `auth.json.lock` (`proper-lockfile`-compatible, still zero dependencies),
+  writes atomically via temp file + rename, and skips the write entirely when
+  the existing file cannot be parsed or the lock is held.
+
 # [0.1.0](https://github.com/pankajudhas81/pi-claude-auth/compare/v0.0.1...v0.1.0) (2026-05-30)
 
 ## 0.0.1

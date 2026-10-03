@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      proper-lockfile:
+        specifier: ^4.1.2
+        version: 4.1.2
     devDependencies:
       '@earendil-works/pi-coding-agent':
         specifier: latest
@@ -14,6 +18,9 @@ importers:
       '@types/node':
         specifier: ^25.5.0
         version: 25.9.1
+      '@types/proper-lockfile':
+        specifier: ^4.1.2
+        version: 4.1.4
       oxfmt:
         specifier: 0.41.0
         version: 0.41.0
@@ -560,6 +567,9 @@ packages:
 
   '@types/node@25.9.1':
     resolution: {integrity: sha512-xfrlY7UD5rMJk3ZVJP8BNzS28J36YJg+xp+LPXV1TdWxr8uMH5A860QNxYDGQe/ylDSgjxE52Q9VnO7p75tJxg==}
+
+  '@types/proper-lockfile@4.1.4':
+    resolution: {integrity: sha512-uo2ABllncSqg9F1D4nugVl9v93RmjxF6LJzQLMLDdPaXCUIDPeOJ21Gbqi43xNKzBi/WQ0Q0dICqufzQbMjipQ==}
 
   '@types/retry@0.12.0':
     resolution: {integrity: sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA==}
@@ -1435,6 +1445,10 @@ snapshots:
   '@types/node@25.9.1':
     dependencies:
       undici-types: 7.24.6
+
+  '@types/proper-lockfile@4.1.4':
+    dependencies:
+      '@types/retry': 0.12.0
 
   '@types/retry@0.12.0': {}
 

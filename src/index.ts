@@ -140,9 +140,17 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
     })
 
     // Seed auth.json so pi uses the Claude Code credentials with zero login.
+    // Never let a lock contention failure abort the extension load: the
+    // 5-minute sync timer converges on the same state.
     const initialCreds = getCachedCredentials()
     if (initialCreds) {
-        syncAuthJson(initialCreds)
+        try {
+            syncAuthJson(initialCreds)
+        } catch (err) {
+            log("seed_sync_failed", {
+                error: err instanceof Error ? err.message : String(err),
+            })
+        }
     } else {
         console.warn(
             "pi-claude-auth: Claude credentials are expired and could not be refreshed. Run `claude` to re-authenticate.",
@@ -200,7 +208,15 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
             saveAccountSource(chosen.source)
 
             const creds = getCachedCredentials() ?? chosen.credentials
-            syncAuthJson(creds)
+            // pi persists the credentials returned from the login itself, so
+            // a failed best-effort sync must not fail the login.
+            try {
+                syncAuthJson(creds)
+            } catch (err) {
+                log("login_sync_failed", {
+                    error: err instanceof Error ? err.message : String(err),
+                })
+            }
             log("login", { source: chosen.source, label: chosen.label })
             return toOAuthCreds(creds)
         },
@@ -208,7 +224,15 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
         async refreshToken(credentials: OAuthCreds): Promise<OAuthCreds> {
             const fresh = forceRefreshActiveCredentials()
             if (fresh) {
-                syncAuthJson(fresh)
+                // pi persists the rotated credentials returned from refresh, so
+                // a failed best-effort sync must not fail the refresh.
+                try {
+                    syncAuthJson(fresh)
+                } catch (err) {
+                    log("refresh_sync_failed", {
+                        error: err instanceof Error ? err.message : String(err),
+                    })
+                }
                 return toOAuthCreds(fresh)
             }
             log("refresh_token_fallback", {

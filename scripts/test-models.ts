@@ -13,36 +13,37 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import {
-    getCachedCredentials,
+    forceRefreshActiveCredentials,
     initAccounts,
     setActiveAccountSource,
 } from "../src/credentials.ts"
 import { readAllClaudeAccounts } from "../src/keychain.ts"
+import { buildUserAgent } from "../src/signing.ts"
+import { injectBillingHeader } from "../src/transforms.ts"
 
-// The supported model set. Keep this in sync with the README table.
+// Smoke-test targets, not the model catalog used by the extension.
 const MODELS = [
     "claude-haiku-4-5",
     "claude-haiku-4-5-20251001",
-    "claude-opus-4-0",
-    "claude-opus-4-1",
-    "claude-opus-4-1-20250805",
-    "claude-opus-4-20250514",
     "claude-opus-4-5",
     "claude-opus-4-5-20251101",
     "claude-opus-4-6",
     "claude-opus-4-7",
     "claude-opus-4-8",
-    "claude-sonnet-4-0",
-    "claude-sonnet-4-20250514",
+    "claude-opus-5",
+    "claude-opus-5-5",
+    "claude-fable-5",
+    "claude-fable-5-1",
     "claude-sonnet-4-5",
     "claude-sonnet-4-5-20250929",
     "claude-sonnet-4-6",
+    "claude-sonnet-5",
+    "claude-sonnet-5-5",
 ]
 
 const API_URL = "https://api.anthropic.com/v1/messages"
 const SYSTEM_IDENTITY =
     "You are Claude Code, Anthropic's official CLI for Claude."
-const CLI_VERSION = process.env.ANTHROPIC_CLI_VERSION ?? "2.1.112"
 
 const c = {
     green: (s: string) => `\x1b[32m${s}\x1b[0m`,
@@ -70,7 +71,7 @@ function buildHeaders(accessToken: string): Headers {
     )
     headers.set("anthropic-dangerous-direct-browser-access", "true")
     headers.set("x-app", "cli")
-    headers.set("user-agent", `claude-cli/${CLI_VERSION} (external, cli)`)
+    headers.set("user-agent", buildUserAgent())
     return headers
 }
 
@@ -79,12 +80,14 @@ async function testModel(
     accessToken: string,
 ): Promise<ModelResult> {
     const start = Date.now()
-    const body = JSON.stringify({
+    const payload = {
         model: modelId,
         max_tokens: 16,
         system: [{ type: "text", text: SYSTEM_IDENTITY }],
         messages: [{ role: "user", content: "hi" }],
-    })
+    }
+    injectBillingHeader(payload)
+    const body = JSON.stringify(payload)
 
     let response: Response
     try {
@@ -142,7 +145,8 @@ function updateReadme(results: ModelResult[]): void {
     const rows = supported.map((m) => `| ${m} |`).join("\n")
     const section = `## Supported models
 
-${supported.length} supported models. Run \`pnpm run test:models\` to verify against your account.
+The extension uses pi's Anthropic model catalog; this table does not restrict it.
+${supported.length} models passed the smoke test against your account.
 
 | Model |
 | ----- |
@@ -199,7 +203,7 @@ async function main(): Promise<void> {
     initAccounts(accounts)
     setActiveAccountSource(accounts[0].source)
 
-    const creds = getCachedCredentials()
+    const creds = await forceRefreshActiveCredentials()
     if (!creds) {
         console.error(
             c.red("Credentials are expired and could not be refreshed."),

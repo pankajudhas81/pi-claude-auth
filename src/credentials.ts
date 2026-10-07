@@ -1,12 +1,12 @@
-import { execFileSync, execSync } from "node:child_process"
 import {
     chmodSync,
     existsSync,
     mkdirSync,
     readFileSync,
+    renameSync,
+    rmSync,
     writeFileSync,
 } from "node:fs"
-import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import {
     readAllClaudeAccounts,
@@ -22,6 +22,9 @@ export type { ClaudeCredentials } from "./keychain.ts"
 export type { ClaudeAccount } from "./keychain.ts"
 
 const CREDENTIAL_CACHE_TTL_MS = 30_000
+const OAUTH_REFRESH_TIMEOUT_MS = 5_000
+const oauthRefreshes = new Map<string, Promise<ClaudeCredentials | null>>()
+const oauthFailures = new Map<string, number>()
 
 const accountCacheMap = new Map<
     string,
@@ -32,6 +35,8 @@ let allAccounts: ClaudeAccount[] = []
 
 export function initAccounts(accounts: ClaudeAccount[]): void {
     allAccounts = accounts
+    accountCacheMap.clear()
+    oauthFailures.clear()
 }
 
 export function getAccounts(): ClaudeAccount[] {
@@ -96,29 +101,58 @@ function syncToPath(authPath: string, creds: ClaudeCredentials): void {
             try {
                 auth = JSON.parse(raw)
             } catch {
-                // Malformed file, start fresh
+                // Torn read from a concurrent writer. Rebuilding from {}
+                // would drop other providers' credentials; skip and retry
+                // on the next sync.
+                log("sync_auth_json_skipped", {
+                    path: authPath,
+                    reason: "malformed or partially written auth.json",
+                })
+                return
             }
         }
     }
     // pi persists OAuth credentials as `{ type: "oauth", access, refresh,
     // expires }` keyed by provider id. Seeding the `anthropic` entry lets pi
     // use the Claude Code credentials with no separate /login.
-    auth.anthropic = {
+    const entry = {
         type: "oauth",
         access: creds.accessToken,
         refresh: creds.refreshToken,
         expires: creds.expiresAt,
     }
+    const existing = auth.anthropic as Record<string, unknown> | undefined
+    if (
+        existing &&
+        existing.type === entry.type &&
+        existing.access === entry.access &&
+        existing.refresh === entry.refresh &&
+        existing.expires === entry.expires
+    ) {
+        return // unchanged; don't risk clobbering concurrent writers
+    }
+    auth.anthropic = entry
     const dir = dirname(authPath)
     if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true, mode: 0o700 })
     }
-    writeFileSync(authPath, JSON.stringify(auth, null, 2), {
-        encoding: "utf-8",
-        mode: 0o600,
-    })
-    if (process.platform !== "win32") {
-        chmodSync(authPath, 0o600)
+    // Atomic replace so readers never see a partial file.
+    const tmpPath = join(
+        dir,
+        `.auth.json.${process.pid}.${Date.now().toString(36)}.tmp`,
+    )
+    try {
+        writeFileSync(tmpPath, JSON.stringify(auth, null, 2), {
+            encoding: "utf-8",
+            mode: 0o600,
+        })
+        if (process.platform !== "win32") {
+            chmodSync(tmpPath, 0o600)
+        }
+        renameSync(tmpPath, authPath)
+    } catch (err) {
+        rmSync(tmpPath, { force: true })
+        throw err
     }
 }
 
@@ -171,100 +205,93 @@ export function parseOAuthResponse(
     }
 }
 
-export function refreshViaOAuth(
+export async function refreshViaOAuth(
     refreshToken: string,
-): ClaudeCredentials | null {
-    // Use a Node subprocess to perform the HTTP request synchronously.
-    // The refresh token is passed via stdin to avoid exposure in process args.
-    const script = `
-    process.stdin.resume();
-    let input = '';
-    process.stdin.on('data', c => input += c);
-    process.stdin.on('end', () => {
-      const body = new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: '${OAUTH_CLIENT_ID}',
-        refresh_token: input.trim()
-      });
-      fetch('${OAUTH_TOKEN_URL}', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body.toString()
-      })
-      .then(r => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
-      .then(d => { process.stdout.write(JSON.stringify(d)); })
-      .catch(e => { process.stdout.write(JSON.stringify({ error: String(e) })); process.exit(1); });
-    });
-  `
+    signal?: AbortSignal,
+): Promise<ClaudeCredentials | null> {
+    signal?.throwIfAborted()
+    if (!refreshToken || (oauthFailures.get(refreshToken) ?? 0) > Date.now()) {
+        return null
+    }
+    const existing = oauthRefreshes.get(refreshToken)
+    if (existing) return existing
 
-    try {
-        log("refresh_started", { source: "oauth" })
-        const result = execFileSync(process.execPath, ["-e", script], {
-            input: refreshToken,
-            timeout: 15_000,
-            encoding: "utf-8",
-            stdio: ["pipe", "pipe", "ignore"],
-        })
-
-        const creds = parseOAuthResponse(result, refreshToken)
-        if (!creds) {
+    const pending = (async () => {
+        try {
+            log("refresh_started", { source: "oauth" })
+            const response = await fetch(OAUTH_TOKEN_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                body: new URLSearchParams({
+                    grant_type: "refresh_token",
+                    client_id: OAUTH_CLIENT_ID,
+                    refresh_token: refreshToken,
+                }).toString(),
+                signal: signal
+                    ? AbortSignal.any([
+                          signal,
+                          AbortSignal.timeout(OAUTH_REFRESH_TIMEOUT_MS),
+                      ])
+                    : AbortSignal.timeout(OAUTH_REFRESH_TIMEOUT_MS),
+            })
+            if (!response.ok) {
+                // Rejected tokens cannot recover until the user re-authenticates.
+                // Transient failures get a short cooldown instead.
+                oauthFailures.set(
+                    refreshToken,
+                    response.status === 400 || response.status === 401
+                        ? Infinity
+                        : Date.now() + CREDENTIAL_CACHE_TTL_MS,
+                )
+                await response.body?.cancel()
+                log("refresh_failed", {
+                    source: "oauth",
+                    status: response.status,
+                })
+                return null
+            }
+            const creds = parseOAuthResponse(
+                await response.text(),
+                refreshToken,
+            )
+            if (!creds) throw new Error("Invalid OAuth token response")
+            oauthFailures.delete(refreshToken)
+            log("refresh_success", { source: "oauth" })
+            return creds
+        } catch (err) {
+            signal?.throwIfAborted()
+            oauthFailures.set(
+                refreshToken,
+                Date.now() + CREDENTIAL_CACHE_TTL_MS,
+            )
             log("refresh_failed", {
                 source: "oauth",
-                error: "no access_token in response",
+                error: err instanceof Error ? err.message : String(err),
             })
             return null
         }
-
-        log("refresh_success", { source: "oauth" })
-        return creds
-    } catch (err) {
-        log("refresh_failed", {
-            source: "oauth",
-            error: err instanceof Error ? err.message : String(err),
-        })
-        return null
+    })()
+    oauthRefreshes.set(refreshToken, pending)
+    try {
+        return await pending
+    } finally {
+        oauthRefreshes.delete(refreshToken)
     }
 }
 
-function refreshViaCli(): void {
-    const maxAttempts = 2
-    for (let i = 0; i < maxAttempts; i++) {
-        log("refresh_started", { source: "cli", attempt: i + 1 })
-        try {
-            execSync("claude -p . --model haiku", {
-                timeout: 60_000,
-                encoding: "utf-8",
-                env: { ...process.env, TERM: "dumb" },
-                stdio: "ignore",
-                cwd: tmpdir(),
-            })
-            log("refresh_success", { source: "cli" })
-            return
-        } catch (err) {
-            log("refresh_failed", {
-                source: "cli",
-                attempt: i + 1,
-                error: err instanceof Error ? err.message : String(err),
-            })
-            // Non-fatal: retry once, then give up
-        }
-    }
-}
-
-export function refreshIfNeeded(
+export async function refreshIfNeeded(
     account?: ClaudeAccount,
-): ClaudeCredentials | null {
+    signal?: AbortSignal,
+): Promise<ClaudeCredentials | null> {
+    signal?.throwIfAborted()
     const target = account ?? getActiveAccount()
     if (!target) return null
 
-    // Pick up external updates to .credentials.json (e.g. the Claude CLI
-    // refreshing in another process). Bounded by getCachedCredentials's 30s
-    // TTL. macOS keychain sources stay on the in-memory path; their state is
-    // mutated only by our own writeBackCredentials.
-    if (target.source === "file") {
-        const onDisk = refreshAccount(target.source)
-        if (onDisk) target.credentials = onDisk
-    }
+    // Pick up external re-authentication on both file and Keychain sources.
+    const onDisk = refreshAccount(target.source)
+    if (onDisk) target.credentials = onDisk
 
     const creds = target.credentials
     if (creds.expiresAt > Date.now() + 60_000) return creds
@@ -275,31 +302,11 @@ export function refreshIfNeeded(
         expiresIn: creds.expiresAt - Date.now(),
     })
 
-    // Try direct OAuth refresh first (zero LLM tokens consumed)
-    if (creds.refreshToken) {
-        const oauthCreds = refreshViaOAuth(creds.refreshToken)
-        if (oauthCreds && oauthCreds.expiresAt > Date.now() + 60_000) {
-            target.credentials = oauthCreds
-            writeBackCredentials(target.source, oauthCreds)
-            return oauthCreds
-        }
-    }
-
-    // Fall back to CLI-based refresh (consumes Haiku tokens)
-    log("refresh_fallback_cli", { source: target.source })
-    refreshViaCli()
-    const refreshed = refreshAccount(target.source)
-    if (refreshed && refreshed.expiresAt > Date.now() + 60_000) {
-        target.credentials = refreshed
-        return refreshed
-    }
-
-    log("refresh_exhausted", {
-        source: target.source,
-        hadCredentials: !!refreshed,
-        expiresAt: refreshed?.expiresAt,
-    })
-    return null
+    const fresh = await refreshViaOAuth(creds.refreshToken, signal)
+    if (!fresh) return null
+    target.credentials = fresh
+    writeBackCredentials(target.source, fresh)
+    return fresh.expiresAt > Date.now() + 60_000 ? fresh : null
 }
 
 /**
@@ -310,24 +317,14 @@ export function refreshIfNeeded(
  * Re-reads the source first (the Claude CLI may have already rotated the
  * token), then falls back to a direct OAuth refresh.
  */
-export function forceRefreshActiveCredentials(): ClaudeCredentials | null {
+export async function forceRefreshActiveCredentials(
+    signal?: AbortSignal,
+): Promise<ClaudeCredentials | null> {
     const account = getActiveAccount()
     if (!account) return null
 
     accountCacheMap.delete(account.source)
-
-    // The on-disk/keychain source may already hold a fresher token.
-    const onDisk = refreshAccount(account.source)
-    if (onDisk) account.credentials = onDisk
-    if (account.credentials.expiresAt > Date.now() + 60_000) {
-        accountCacheMap.set(account.source, {
-            creds: account.credentials,
-            cachedAt: Date.now(),
-        })
-        return account.credentials
-    }
-
-    const fresh = refreshIfNeeded(account)
+    const fresh = await refreshIfNeeded(account, signal)
     if (fresh) {
         accountCacheMap.set(account.source, {
             creds: fresh,
@@ -339,7 +336,7 @@ export function forceRefreshActiveCredentials(): ClaudeCredentials | null {
 
 /**
  * Returns the active account's credentials for auth.json sync purposes.
- * Unlike getCachedCredentials(), this does NOT trigger a refresh.
+ * This does NOT trigger a refresh or re-read credential storage.
  * Returns null if no account or credentials are expired.
  */
 export function getCredentialsForSync(): ClaudeCredentials | null {
@@ -361,30 +358,18 @@ export function getCachedCredentials(): ClaudeCredentials | null {
 
     const now = Date.now()
     const cached = accountCacheMap.get(account.source)
-    if (
-        cached &&
-        now - cached.cachedAt < CREDENTIAL_CACHE_TTL_MS &&
-        cached.creds.expiresAt > now + 60_000
-    ) {
-        log("cache_hit", {
-            source: account.source,
-            ttlRemaining: CREDENTIAL_CACHE_TTL_MS - (now - cached.cachedAt),
-        })
-        return cached.creds
+    if (cached && now - cached.cachedAt < CREDENTIAL_CACHE_TTL_MS) {
+        return cached.creds.expiresAt > now + 60_000 ? cached.creds : null
     }
 
-    log("cache_miss", {
-        source: account.source,
-        reason: cached ? "stale or expiring" : "empty",
+    // Synchronous API-key resolution must never start a network request or
+    // a Claude agent run. Refresh happens only in the async OAuth lifecycle.
+    const onDisk = refreshAccount(account.source)
+    if (onDisk) account.credentials = onDisk
+    const creds = account.credentials
+    accountCacheMap.set(account.source, {
+        creds,
+        cachedAt: now,
     })
-
-    const fresh = refreshIfNeeded(account)
-    if (!fresh) {
-        log("credentials_unavailable", { source: account.source })
-        accountCacheMap.delete(account.source)
-        return null
-    }
-
-    accountCacheMap.set(account.source, { creds: fresh, cachedAt: now })
-    return fresh
+    return creds.expiresAt > now + 60_000 ? creds : null
 }

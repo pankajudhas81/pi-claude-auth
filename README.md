@@ -6,11 +6,17 @@ your existing Claude Code credentials — no separate login or API key needed.
 ## Quick start
 
 ```bash
-pi install npm:@pankajudhas81/pi-claude-auth
+pi install npm:pi-claude-auth
 ```
 
 Restart pi, pick a model with `/model` (or Ctrl+L). Done — your Claude Code
 credentials are already seeded.
+
+The npm command installs the upstream release. To use the fixes in this fork:
+
+```bash
+pi install git:github.com/itsmingjie/pi-claude-auth
+```
 
 ## Prerequisites
 
@@ -32,7 +38,7 @@ credentials are already seeded.
 ### Option A: pi package manager (recommended)
 
 ```bash
-pi install npm:@pankajudhas81/pi-claude-auth
+pi install npm:pi-claude-auth
 ```
 
 Installs the extension globally to `~/.pi/agent/npm/`. Use `-l` for a
@@ -44,7 +50,7 @@ Add to `~/.pi/agent/settings.json` (global) or `.pi/settings.json` (project):
 
 ```json
 {
-    "packages": ["npm:@pankajudhas81/pi-claude-auth@latest"]
+    "packages": ["npm:pi-claude-auth@latest"]
 }
 ```
 
@@ -62,7 +68,7 @@ https://raw.githubusercontent.com/pankajudhas81/pi-claude-auth/main/installation
 ### Updating
 
 ```bash
-pi update npm:@pankajudhas81/pi-claude-auth
+pi update npm:pi-claude-auth
 ```
 
 ## Verify it's working
@@ -76,7 +82,7 @@ pi config
 You should see the extension listed:
 
 ```
-npm:@pankajudhas81/pi-claude-auth (user)
+npm:pi-claude-auth (user)
   Extensions
     [x] src/index.ts
 ```
@@ -107,8 +113,10 @@ There are several good community projects solving Anthropic auth for pi (see
   Switch via `/login` when you have multiple accounts (Pro, Max, etc.).
 - **Background sync** — re-syncs auth every 5 minutes and writes refreshed
   tokens back to Claude Code's storage, keeping both tools in sync.
-- **Two-tier token refresh** — refreshes directly via Anthropic's OAuth endpoint
-  (zero LLM tokens consumed), falls back to the Claude CLI only if needed.
+- **Bounded async token refresh** — refreshes directly via Anthropic's OAuth
+  endpoint with a five-second timeout, without launching a Claude agent.
+  Rejected refresh tokens require manual re-authentication; transient failures
+  have a 30-second retry cooldown.
 
 If you prefer a browser-based OAuth flow or need relay/caching features,
 check out [pi-anthropic-oauth](https://github.com/leohenon/pi-anthropic-oauth)
@@ -117,26 +125,32 @@ or [@cortexkit/pi-anthropic-auth](https://pi.dev/packages/@cortexkit/pi-anthropi
 
 ## Supported models
 
-16 supported models. Run `pnpm run test:models` to verify against your account.
+The extension uses pi's Anthropic model catalog; the smoke-test script does not
+control which models appear in `/model`. Opus 5 and newer models are available
+when your pi version and Claude subscription support them. Update pi if a model
+is missing, and check the Claude Code version pin below for version-gate errors.
+
+These are the 16 smoke-test targets, not a claim of verified account access.
+Run `pnpm run test:models` to verify them against your account.
 
 | Model                      |
 | -------------------------- |
 | claude-haiku-4-5           |
 | claude-haiku-4-5-20251001  |
-| claude-opus-4-0            |
-| claude-opus-4-1            |
-| claude-opus-4-1-20250805   |
-| claude-opus-4-20250514     |
 | claude-opus-4-5            |
 | claude-opus-4-5-20251101   |
 | claude-opus-4-6            |
 | claude-opus-4-7            |
 | claude-opus-4-8            |
-| claude-sonnet-4-0          |
-| claude-sonnet-4-20250514   |
+| claude-opus-5              |
+| claude-opus-5-5            |
+| claude-fable-5             |
+| claude-fable-5-1           |
 | claude-sonnet-4-5          |
 | claude-sonnet-4-5-20250929 |
 | claude-sonnet-4-6          |
+| claude-sonnet-5            |
+| claude-sonnet-5-5          |
 
 ## Credential sources
 
@@ -150,7 +164,9 @@ The extension checks these in order:
 
 If you have multiple Claude Code accounts authenticated on macOS, the extension
 detects all of them from the Keychain automatically. Each account is labeled by
-its subscription tier (Claude Pro, Claude Max, etc.).
+its subscription tier (Claude Pro, Claude Max, etc.). Items sharing a service
+name remain separate when their Keychain account names differ. Without a saved
+selection, the credential with the latest expiry is used by default.
 
 To switch accounts:
 
@@ -164,20 +180,21 @@ one account is found, the picker is skipped.
 
 ## Troubleshooting
 
-| Problem                            | Solution                                                                                                         |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| "No Claude Code credentials found" | Run `claude` to authenticate with Claude Code first                                                              |
-| "Keychain is locked"               | Run `security unlock-keychain ~/Library/Keychains/login.keychain-db`                                             |
-| "Token expired and refresh failed" | The extension runs the `claude` CLI to refresh automatically. If this fails, re-authenticate by running `claude` |
-| Not working on Linux/Windows       | Ensure `~/.claude/.credentials.json` exists. Run `claude` to create it                                           |
-| Keychain access denied             | Grant access when macOS prompts you                                                                              |
-| Keychain read timed out            | Restart Keychain Access (can happen on macOS Tahoe)                                                              |
-| Package not updating               | Run `pi update npm:@pankajudhas81/pi-claude-auth`                                                                |
+| Problem                            | Solution                                                                                                                |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| "No Claude Code credentials found" | Run `claude` to authenticate with Claude Code first                                                                     |
+| "Keychain is locked"               | Run `security unlock-keychain ~/Library/Keychains/login.keychain-db`                                                    |
+| "Token expired and refresh failed" | Re-authenticate by running `claude`, then retry. The extension never starts a Claude agent to refresh tokens.           |
+| Not working on Linux/Windows       | Ensure `~/.claude/.credentials.json` exists. Run `claude` to create it                                                  |
+| Keychain access denied             | Grant access when macOS prompts you                                                                                     |
+| Keychain read timed out            | Restart Keychain Access (can happen on macOS Tahoe)                                                                     |
+| Package not updating               | Run `pi update npm:pi-claude-auth` for upstream, or `pi update git:github.com/itsmingjie/pi-claude-auth` for this fork. |
 
 ### Claude Code version pinning
 
-The Claude Code version is pinned to `2.1.160` for billing header computation.
-If billing reverts to extra usage after a Claude Code update, override:
+The Claude Code version is pinned to `2.1.280` for the user-agent and billing header.
+If Anthropic rejects a model with `claude_code_version_too_old`, or billing reverts
+to extra usage after a Claude Code update, override with the required version:
 
 ```bash
 export ANTHROPIC_CLI_VERSION=<new-version>
@@ -186,7 +203,7 @@ export ANTHROPIC_CLI_VERSION=<new-version>
 or update the package:
 
 ```bash
-pi update npm:@pankajudhas81/pi-claude-auth
+pi update npm:pi-claude-auth
 ```
 
 ### Diagnostic logging
@@ -233,7 +250,7 @@ write-back is enabled by default to keep your stored credentials valid.
 | ----------------------- | ----------------------------------------------------------------------- | ------------- |
 | `PI_CODING_AGENT_DIR`   | pi's config directory (where `auth.json` lives)                         | `~/.pi/agent` |
 | `PI_CLAUDE_AUTH_DEBUG`  | Enable diagnostic logging (`1` for default path, or a custom file path) | disabled      |
-| `ANTHROPIC_CLI_VERSION` | Claude CLI version for billing headers                                  | `2.1.160`     |
+| `ANTHROPIC_CLI_VERSION` | Claude CLI version for user-agent and billing headers                   | `2.1.280`     |
 
 ## How it works
 
@@ -250,11 +267,15 @@ can be switched via `/login`.
 
 It overrides the `anthropic` provider's OAuth lifecycle: when a token is near
 expiry, pi delegates refresh to this extension, which refreshes directly via
-Anthropic's OAuth endpoint (zero LLM tokens consumed), falls back to the Claude
-CLI if that fails, and writes rotated tokens **back** to the Keychain or
-credentials file so Claude Code and pi stay in sync. A background re-sync runs
-every 5 minutes. pi's built-in Anthropic provider handles the Claude Code
-request fidelity (identity, beta flags, tool naming) for OAuth tokens.
+Anthropic's OAuth endpoint asynchronously (zero LLM tokens consumed), with a
+five-second timeout, and writes rotated tokens **back** to the Keychain or
+credentials file so Claude Code and pi stay in sync. Failed refreshes never
+launch a Claude agent. Rejected tokens are not retried until the stored refresh
+token changes; temporary errors are retried after a 30-second cooldown. Both
+Keychain and file credentials are re-read so an external login is picked up.
+A background re-sync runs every 5 minutes. pi's built-in Anthropic provider
+handles the Claude Code request fidelity (identity, beta flags, tool naming)
+for OAuth tokens.
 
 ### Technical details
 
@@ -267,9 +288,9 @@ request fidelity (identity, beta flags, tool naming) for OAuth tokens.
   `pi.registerProvider("anthropic", { oauth })`:
     - `login` reads the Keychain/file (no browser) and exposes an account picker
       when multiple accounts exist
-    - `refreshToken` refreshes directly via `POST https://claude.ai/v1/oauth/token`
-      (no LLM tokens), falls back to the `claude` CLI, and writes rotated tokens
-      back to the Keychain (macOS) or credentials file (other platforms)
+    - `refreshToken` refreshes asynchronously via `POST https://claude.ai/v1/oauth/token`
+      (no LLM tokens), and writes rotated tokens back to the exact Keychain item
+      (macOS) or credentials file (other platforms)
     - `getApiKey` returns the freshest cached access token
 - Re-syncs `auth.json` every 5 minutes (sync never triggers a refresh; refresh
   is lazy, only when pi requests it or a request needs a fresh token)

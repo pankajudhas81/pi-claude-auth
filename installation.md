@@ -48,7 +48,7 @@ This stores credentials in the Keychain (macOS) or
 ### Option A: Install as a pi package
 
 ```bash
-pi install npm:@pankajudhas81/pi-claude-auth
+pi install npm:pi-claude-auth
 ```
 
 This installs the extension globally to `~/.pi/agent/npm/` and enables it. Use
@@ -61,7 +61,7 @@ add the package to the `packages` array:
 
 ```json
 {
-    "packages": ["npm:@pankajudhas81/pi-claude-auth@latest"]
+    "packages": ["npm:pi-claude-auth@latest"]
 }
 ```
 
@@ -72,10 +72,10 @@ node -e "
 const fs = require('fs'), path = require('path');
 const p = path.join(process.env.PI_CODING_AGENT_DIR || path.join(require('os').homedir(), '.pi/agent'), 'settings.json');
 const c = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p,'utf8')) : {};
-c.packages = [...new Set([...(Array.isArray(c.packages) ? c.packages : []), 'npm:@pankajudhas81/pi-claude-auth@latest'])];
+c.packages = [...new Set([...(Array.isArray(c.packages) ? c.packages : []), 'npm:pi-claude-auth@latest'])];
 fs.mkdirSync(path.dirname(p), {recursive:true});
 fs.writeFileSync(p, JSON.stringify(c, null, 2));
-console.log('Added npm:@pankajudhas81/pi-claude-auth@latest to', p);
+console.log('Added npm:pi-claude-auth@latest to', p);
 "
 ```
 
@@ -94,7 +94,7 @@ is required — the extension has already seeded your Claude Code credentials.
 ## Upgrading
 
 ```bash
-pi update npm:@pankajudhas81/pi-claude-auth
+pi update npm:pi-claude-auth
 ```
 
 ## Done

@@ -16,7 +16,11 @@ import {
     syncAuthJson,
     type ClaudeCredentials,
 } from "./credentials.ts"
-import { readAllClaudeAccounts, type ClaudeAccount } from "./keychain.ts"
+import {
+    decodeSource,
+    readAllClaudeAccounts,
+    type ClaudeAccount,
+} from "./keychain.ts"
 import { initLogger, log } from "./logger.ts"
 import { buildUserAgent } from "./signing.ts"
 import { injectBillingHeader } from "./transforms.ts"
@@ -89,7 +93,7 @@ function applyCredential(ctx: ExtensionContext): boolean {
  * - Injects the credentials into pi's live AuthStorage on every session start
  *   (and seeds auth.json) so they take priority over any ANTHROPIC_API_KEY.
  * - Overrides the `anthropic` provider's OAuth lifecycle: refresh goes through
- *   Anthropic's OAuth endpoint (with Claude CLI fallback) and rotated tokens
+ *   Anthropic's OAuth endpoint asynchronously and rotated tokens
  *   are written back to the Keychain / credentials file. Multiple accounts are
  *   selectable via `/login`.
  * - Overrides the user-agent to the full Claude Code form and injects the
@@ -128,7 +132,10 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
     const persistedSource = loadPersistedAccountSource()
     const defaultAccount =
         (persistedSource &&
-            accounts.find((a) => a.source === persistedSource)) ||
+            (accounts.find((a) => a.source === persistedSource) ??
+                accounts.find(
+                    (a) => decodeSource(a.source).service === persistedSource,
+                ))) ||
         accounts[0]
 
     setActiveAccountSource(defaultAccount.source)
@@ -140,7 +147,7 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
     })
 
     // Seed auth.json so pi uses the Claude Code credentials with zero login.
-    const initialCreds = getCachedCredentials()
+    const initialCreds = await forceRefreshActiveCredentials()
     if (initialCreds) {
         syncAuthJson(initialCreds)
     } else {
@@ -171,11 +178,15 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
                 )
             }
 
-            const currentSource =
+            const persisted =
                 loadPersistedAccountSource() ?? defaultAccount.source
             let chosen =
-                latestAccounts.find((a) => a.source === currentSource) ??
+                latestAccounts.find((a) => a.source === persisted) ??
+                latestAccounts.find(
+                    (a) => decodeSource(a.source).service === persisted,
+                ) ??
                 latestAccounts[0]
+            const currentSource = chosen.source
 
             // Offer an account picker when multiple Claude Code accounts exist.
             if (latestAccounts.length > 1 && callbacks.onSelect) {
@@ -199,24 +210,32 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
             setActiveAccountSource(chosen.source)
             saveAccountSource(chosen.source)
 
-            const creds = getCachedCredentials() ?? chosen.credentials
+            const creds = await forceRefreshActiveCredentials(callbacks.signal)
+            if (!creds) {
+                throw new Error(
+                    "Claude credentials could not be refreshed. Run `claude` to re-authenticate, then retry /login.",
+                )
+            }
             syncAuthJson(creds)
             log("login", { source: chosen.source, label: chosen.label })
             return toOAuthCreds(creds)
         },
 
-        async refreshToken(credentials: OAuthCreds): Promise<OAuthCreds> {
-            const fresh = forceRefreshActiveCredentials()
+        async refreshToken(
+            _credentials: OAuthCreds,
+            signal: AbortSignal,
+        ): Promise<OAuthCreds> {
+            const fresh = await forceRefreshActiveCredentials(signal)
             if (fresh) {
                 syncAuthJson(fresh)
                 return toOAuthCreds(fresh)
             }
-            log("refresh_token_fallback", {
+            log("refresh_token_failed", {
                 reason: "force refresh returned null",
             })
-            // Return the supplied credentials unchanged so pi can surface a
-            // clear auth error rather than crashing.
-            return credentials
+            throw new Error(
+                "Claude credentials could not be refreshed. Run `claude` to re-authenticate, then retry.",
+            )
         },
 
         getApiKey(credentials: OAuthCreds): string {

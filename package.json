@@ -1,5 +1,5 @@
 {
-    "name": "@pankajudhas81/pi-claude-auth",
+    "name": "pi-claude-auth",
     "version": "0.1.0",
     "description": "Pi coding agent extension that uses your Claude Code credentials — no separate login needed.",
     "keywords": [

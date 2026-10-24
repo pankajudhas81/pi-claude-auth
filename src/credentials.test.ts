@@ -1,13 +1,17 @@
 import assert from "node:assert/strict"
+import childProcess from "node:child_process"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { syncBuiltinESMExports } from "node:module"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, beforeEach, test } from "node:test"
+import { afterEach, beforeEach, mock, test } from "node:test"
 import {
     loadPersistedAccountSource,
     parseOAuthResponse,
+    refreshIfNeeded,
     saveAccountSource,
     syncAuthJson,
+    type ClaudeAccount,
 } from "./credentials.ts"
 
 let dir = ""
@@ -23,6 +27,8 @@ afterEach(() => {
     if (prevEnv === undefined) delete process.env.PI_CODING_AGENT_DIR
     else process.env.PI_CODING_AGENT_DIR = prevEnv
     rmSync(dir, { recursive: true, force: true })
+    mock.restoreAll()
+    syncBuiltinESMExports()
 })
 
 test("parseOAuthResponse: maps a valid token response", () => {
@@ -110,4 +116,50 @@ test("account source persistence round-trips", () => {
     assert.equal(loadPersistedAccountSource(), null)
     saveAccountSource("Claude Code-credentials")
     assert.equal(loadPersistedAccountSource(), "Claude Code-credentials")
+})
+
+function keychainAccount(): ClaudeAccount {
+    return {
+        label: "Claude",
+        source: "Claude Code-credentials",
+        credentials: {
+            accessToken: "old-access",
+            refreshToken: "old-refresh",
+            expiresAt: Date.now() + 60 * 60 * 1000,
+        },
+    }
+}
+
+// keychain.ts reads entries through `security`; mocking execSync stands in
+// for the macOS Keychain.
+function mockKeychain(impl: () => string): void {
+    mock.method(childProcess, "execSync", impl)
+    syncBuiltinESMExports()
+}
+
+test("refreshIfNeeded: picks up keychain tokens rotated by another process", () => {
+    const expiresAt = Date.now() + 8 * 60 * 60 * 1000
+    mockKeychain(() =>
+        JSON.stringify({
+            claudeAiOauth: {
+                accessToken: "new-access",
+                refreshToken: "new-refresh",
+                expiresAt,
+            },
+        }),
+    )
+
+    const creds = refreshIfNeeded(keychainAccount())
+    assert.equal(creds?.accessToken, "new-access")
+    assert.equal(creds?.refreshToken, "new-refresh")
+    assert.equal(creds?.expiresAt, expiresAt)
+})
+
+test("refreshIfNeeded: keeps in-memory credentials when the keychain can't be read", () => {
+    mockKeychain(() => {
+        throw Object.assign(new Error("keychain locked"), { status: 36 })
+    })
+
+    const creds = refreshIfNeeded(keychainAccount())
+    assert.equal(creds?.accessToken, "old-access")
 })

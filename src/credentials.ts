@@ -257,13 +257,15 @@ export function refreshIfNeeded(
     const target = account ?? getActiveAccount()
     if (!target) return null
 
-    // Pick up external updates to .credentials.json (e.g. the Claude CLI
-    // refreshing in another process). Bounded by getCachedCredentials's 30s
-    // TTL. macOS keychain sources stay on the in-memory path; their state is
-    // mutated only by our own writeBackCredentials.
-    if (target.source === "file") {
+    // Pick up external updates (the Claude CLI or another pi process
+    // refreshing). A refresh rotates the token and revokes the old access
+    // token, so the keychain must be re-read too, not only
+    // .credentials.json. Bounded by getCachedCredentials's 30s TTL.
+    try {
         const onDisk = refreshAccount(target.source)
         if (onDisk) target.credentials = onDisk
+    } catch {
+        // Keep the in-memory credentials if the source can't be read
     }
 
     const creds = target.credentials

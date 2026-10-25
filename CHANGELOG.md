@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Install instructions use the published package name, `pi-claude-auth`
+  (#1). The README and `installation.md` pointed at
+  `@pankajudhas81/pi-claude-auth`, which was never published and returns 404.
+  `package.json` goes back to the unscoped name and to `0.1.3`, the last
+  version published, so the next release continues from it.
+
 # [0.1.0](https://github.com/pankajudhas81/pi-claude-auth/compare/v0.0.1...v0.1.0) (2026-05-30)
 
 ## 0.0.1

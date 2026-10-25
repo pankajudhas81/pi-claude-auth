@@ -269,8 +269,12 @@ request fidelity (identity, beta flags, tool naming) for OAuth tokens.
       when multiple accounts exist
     - `refreshToken` refreshes directly via `POST https://claude.ai/v1/oauth/token`
       (no LLM tokens), falls back to the `claude` CLI, and writes rotated tokens
-      back to the Keychain (macOS) or credentials file (other platforms)
-    - `getApiKey` returns the freshest cached access token
+      back to the Keychain (macOS) or credentials file (other platforms). Refresh
+      is asynchronous: pi waits at most 8 seconds (less if pi cancels), a slower
+      refresh finishes in the background, and a refresh token that just failed
+      is not retried for 5 minutes (never, if Anthropic rejected it)
+    - `getApiKey` returns the freshest cached access token and never waits on
+      a refresh
 - Re-syncs `auth.json` every 5 minutes (sync never triggers a refresh; refresh
   is lazy, only when pi requests it or a request needs a fresh token)
 - pi's built-in Anthropic provider applies the Claude Code identity, beta flags,

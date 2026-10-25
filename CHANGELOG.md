@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- An expired login no longer freezes pi for up to ~120s on every
+  model-catalog refresh (#7). Token refresh is asynchronous: the OAuth request
+  runs in process with a 5s timeout (it used to spawn `process.execPath -e`,
+  which is not Node when pi runs as a standalone binary), the `claude -p`
+  fallback runs once, asynchronously, for at most 60s, and pi's
+  `refreshToken` hook waits at most 8s (or until pi aborts it) while a slower
+  refresh finishes in the background. Concurrent callers share one refresh; a
+  refresh token the server rejected is not retried and skips the CLI, and one
+  that failed otherwise is not retried for 5 minutes. `getApiKey` and startup
+  never wait on a refresh.
+- `refreshIfNeeded()` and `forceRefreshActiveCredentials()` now return
+  promises; `getCachedCredentials()` no longer refreshes (it starts a
+  background refresh and returns `null` while credentials are expired).
+
 # [0.1.0](https://github.com/pankajudhas81/pi-claude-auth/compare/v0.0.1...v0.1.0) (2026-05-30)
 
 ## 0.0.1

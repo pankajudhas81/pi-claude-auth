@@ -1,4 +1,4 @@
-import { execFileSync, execSync } from "node:child_process"
+import { execFileSync } from "node:child_process"
 import { chmodSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -60,6 +60,36 @@ export function decodeSource(source: string): KeychainRef {
 }
 
 /**
+ * Reads an item's `acct` attribute from its dump record. `security` prints
+ * ASCII values quoted (`"acct"<blob>="alice"`) and anything else, such as a
+ * non-ASCII macOS username, as hex (`"acct"<blob>=0x6AC3A9... "j\303\251..."`).
+ */
+function parseAccountAttribute(record: string): string | undefined {
+    const quoted = /"acct"<blob>="([^"]*)"/.exec(record)
+    if (quoted) return quoted[1]
+    const hex = /"acct"<blob>=0x([0-9A-Fa-f]+)/.exec(record)
+    return hex ? Buffer.from(hex[1], "hex").toString("utf-8") : undefined
+}
+
+/**
+ * Finds the account a stored `source` refers to. Sources persisted before
+ * accounts were told apart name only the service; they resolve to that
+ * service's freshest item (`accounts` is ordered freshest first) rather than
+ * to whichever item `security` happens to return.
+ */
+export function findAccount(
+    accounts: ClaudeAccount[],
+    source: string | null,
+): ClaudeAccount | undefined {
+    if (!source) return undefined
+    const exact = accounts.find((a) => a.source === source)
+    if (exact) return exact
+    const ref = decodeSource(source)
+    if (ref.account !== undefined) return undefined
+    return accounts.find((a) => decodeSource(a.source).service === ref.service)
+}
+
+/**
  * Extracts every Claude Code credential item from `security dump-keychain`
  * output, keyed by service and account.
  *
@@ -79,10 +109,9 @@ export function parseKeychainDump(dump: string): KeychainRef[] {
                 record,
             )
         if (!svcMatch) continue
-        const acctMatch = /"acct"<blob>="([^"]*)"/.exec(record)
         const ref: KeychainRef = {
             service: svcMatch[1],
-            account: acctMatch ? acctMatch[1] : undefined,
+            account: parseAccountAttribute(record),
         }
         const key = encodeSource(ref)
         if (seen.has(key)) continue
@@ -230,10 +259,11 @@ function readKeychainService(ref: KeychainRef | string): string | null {
 
 function listClaudeKeychainRefs(): KeychainRef[] {
     try {
-        const dump = execSync("security dump-keychain", {
+        const dump = execFileSync("/usr/bin/security", ["dump-keychain"], {
             timeout: 5000,
             maxBuffer: 1024 * 1024 * 10, // 10 MB
             encoding: "utf-8",
+            stdio: ["ignore", "pipe", "ignore"],
         })
         const refs = parseKeychainDump(dump)
         if (refs.length === 0) return [{ service: PRIMARY_SERVICE }]

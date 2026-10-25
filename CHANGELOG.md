@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Expired credentials no longer shadow a valid login when several Keychain
+  items share the `Claude Code-credentials` service (#4). Items are read by
+  service and account (`security -s <service> -a <account>`), every item is
+  listed in the `/login` picker, the item that expires last becomes the
+  default, and write-back updates exactly the item that was read. Account
+  names that `security` prints hex-encoded (non-ASCII macOS usernames) are
+  decoded. A selection saved by an earlier version, which names only the
+  service, resolves to that service's freshest item. Based on PR #5 by
+  @mattsegura.
+
 # [0.1.0](https://github.com/pankajudhas81/pi-claude-auth/compare/v0.0.1...v0.1.0) (2026-05-30)
 
 ## 0.0.1

@@ -16,7 +16,11 @@ import {
     syncAuthJson,
     type ClaudeCredentials,
 } from "./credentials.ts"
-import { readAllClaudeAccounts, type ClaudeAccount } from "./keychain.ts"
+import {
+    findAccount,
+    readAllClaudeAccounts,
+    type ClaudeAccount,
+} from "./keychain.ts"
 import { initLogger, log } from "./logger.ts"
 import { buildUserAgent } from "./signing.ts"
 import { injectBillingHeader } from "./transforms.ts"
@@ -125,11 +129,8 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
         return
     }
 
-    const persistedSource = loadPersistedAccountSource()
     const defaultAccount =
-        (persistedSource &&
-            accounts.find((a) => a.source === persistedSource)) ||
-        accounts[0]
+        findAccount(accounts, loadPersistedAccountSource()) ?? accounts[0]
 
     setActiveAccountSource(defaultAccount.source)
 
@@ -171,11 +172,12 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
                 )
             }
 
-            const currentSource =
-                loadPersistedAccountSource() ?? defaultAccount.source
-            let chosen =
-                latestAccounts.find((a) => a.source === currentSource) ??
-                latestAccounts[0]
+            const current =
+                findAccount(
+                    latestAccounts,
+                    loadPersistedAccountSource() ?? defaultAccount.source,
+                ) ?? latestAccounts[0]
+            let chosen = current
 
             // Offer an account picker when multiple Claude Code accounts exist.
             if (latestAccounts.length > 1 && callbacks.onSelect) {
@@ -184,7 +186,7 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
                     options: latestAccounts.map((a) => ({
                         id: a.source,
                         label:
-                            a.source === currentSource
+                            a.source === current.source
                                 ? `${a.label} (active)`
                                 : a.label,
                     })),

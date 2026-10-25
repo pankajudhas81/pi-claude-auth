@@ -152,6 +152,12 @@ If you have multiple Claude Code accounts authenticated on macOS, the extension
 detects all of them from the Keychain automatically. Each account is labeled by
 its subscription tier (Claude Pro, Claude Max, etc.).
 
+Keychain items are told apart by service **and** account name, so several items
+under the same `Claude Code-credentials` service (Claude Code has stored its
+login under both a `default` account and your macOS username) are all listed.
+Without a saved selection, the item whose token expires last is used, so a
+leftover expired item cannot shadow a valid login.
+
 To switch accounts:
 
 ```

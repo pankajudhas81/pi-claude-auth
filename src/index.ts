@@ -10,6 +10,7 @@ import {
     getCredentialsForSync,
     initAccounts,
     loadPersistedAccountSource,
+    refreshIfNeeded,
     refreshAccountsList,
     saveAccountSource,
     setActiveAccountSource,
@@ -140,13 +141,25 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
     })
 
     // Seed auth.json so pi uses the Claude Code credentials with zero login.
+    // Expired credentials are refreshed in the background so pi's startup
+    // never waits on the network or the Claude CLI.
     const initialCreds = getCachedCredentials()
     if (initialCreds) {
         syncAuthJson(initialCreds)
     } else {
-        console.warn(
-            "pi-claude-auth: Claude credentials are expired and could not be refreshed. Run `claude` to re-authenticate.",
-        )
+        void refreshIfNeeded().then((fresh) => {
+            if (!fresh) {
+                console.warn(
+                    "pi-claude-auth: Claude credentials are expired and could not be refreshed. Run `claude` to re-authenticate.",
+                )
+                return
+            }
+            try {
+                syncAuthJson(fresh)
+            } catch {
+                // Non-fatal: the 5-minute sync retries.
+            }
+        })
     }
 
     // Keep auth.json synced with current credentials (no refresh triggered).
@@ -205,8 +218,11 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
             return toOAuthCreds(creds)
         },
 
-        async refreshToken(credentials: OAuthCreds): Promise<OAuthCreds> {
-            const fresh = forceRefreshActiveCredentials()
+        async refreshToken(
+            credentials: OAuthCreds,
+            signal?: AbortSignal,
+        ): Promise<OAuthCreds> {
+            const fresh = await forceRefreshActiveCredentials(signal)
             if (fresh) {
                 syncAuthJson(fresh)
                 return toOAuthCreds(fresh)

@@ -13,8 +13,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import {
-    getCachedCredentials,
     initAccounts,
+    refreshIfNeeded,
     setActiveAccountSource,
 } from "../src/credentials.ts"
 import { readAllClaudeAccounts } from "../src/keychain.ts"
@@ -199,7 +199,7 @@ async function main(): Promise<void> {
     initAccounts(accounts)
     setActiveAccountSource(accounts[0].source)
 
-    const creds = getCachedCredentials()
+    const creds = await refreshIfNeeded()
     if (!creds) {
         console.error(
             c.red("Credentials are expired and could not be refreshed."),

@@ -1,4 +1,5 @@
-import { execFileSync, execSync } from "node:child_process"
+import { spawn } from "node:child_process"
+import { once } from "node:events"
 import {
     chmodSync,
     existsSync,
@@ -171,50 +172,70 @@ export function parseOAuthResponse(
     }
 }
 
-export function refreshViaOAuth(
+/** Upper bound for one OAuth token request. */
+const OAUTH_TIMEOUT_MS = 5_000
+
+/** Upper bound for one delegated `claude -p` refresh run. */
+const CLI_TIMEOUT_MS = 60_000
+
+/**
+ * How long `forceRefreshActiveCredentials` lets its caller wait. pi gives its
+ * whole model-catalog refresh 15s, and calls `refreshToken` while holding its
+ * auth.json lock, so a refresh still running after this keeps going in the
+ * background and the caller gets an answer now.
+ */
+export const REFRESH_WAIT_MS = 8_000
+
+/**
+ * After a refresh attempt fails, the same refresh token is not tried again
+ * for this long (a `claude -p` run costs real tokens). A refresh token the
+ * OAuth endpoint rejected is never retried; a different one, e.g. after the
+ * user re-runs `claude`, starts fresh immediately.
+ */
+const RETRY_AFTER_FAILURE_MS = 5 * 60_000
+
+/** Refreshes in flight, keyed by the refresh token they spend. */
+const refreshesInFlight = new Map<string, Promise<ClaudeCredentials | null>>()
+/** Earliest time a failed refresh token may be tried again. */
+const retryNotBefore = new Map<string, number>()
+
+type OAuthRefreshResult = ClaudeCredentials | "rejected" | "failed"
+
+/**
+ * Exchange a refresh token at Anthropic's OAuth endpoint, in process and
+ * bounded by OAUTH_TIMEOUT_MS. "rejected" means the server refused the token
+ * (400/401), so retrying it cannot help; "failed" covers everything
+ * transient (network errors, timeouts, 403 from bot protection, 5xx).
+ */
+export async function refreshViaOAuth(
     refreshToken: string,
-): ClaudeCredentials | null {
-    // Use a Node subprocess to perform the HTTP request synchronously.
-    // The refresh token is passed via stdin to avoid exposure in process args.
-    const script = `
-    process.stdin.resume();
-    let input = '';
-    process.stdin.on('data', c => input += c);
-    process.stdin.on('end', () => {
-      const body = new URLSearchParams({
-        grant_type: 'refresh_token',
-        client_id: '${OAUTH_CLIENT_ID}',
-        refresh_token: input.trim()
-      });
-      fetch('${OAUTH_TOKEN_URL}', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body.toString()
-      })
-      .then(r => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
-      .then(d => { process.stdout.write(JSON.stringify(d)); })
-      .catch(e => { process.stdout.write(JSON.stringify({ error: String(e) })); process.exit(1); });
-    });
-  `
-
+): Promise<OAuthRefreshResult> {
+    log("refresh_started", { source: "oauth" })
     try {
-        log("refresh_started", { source: "oauth" })
-        const result = execFileSync(process.execPath, ["-e", script], {
-            input: refreshToken,
-            timeout: 15_000,
-            encoding: "utf-8",
-            stdio: ["pipe", "pipe", "ignore"],
+        const response = await fetch(OAUTH_TOKEN_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+                grant_type: "refresh_token",
+                client_id: OAUTH_CLIENT_ID,
+                refresh_token: refreshToken,
+            }).toString(),
+            signal: AbortSignal.timeout(OAUTH_TIMEOUT_MS),
         })
-
-        const creds = parseOAuthResponse(result, refreshToken)
+        const body = await response.text()
+        if (!response.ok) {
+            const rejected = response.status === 400 || response.status === 401
+            log("refresh_failed", { source: "oauth", status: response.status })
+            return rejected ? "rejected" : "failed"
+        }
+        const creds = parseOAuthResponse(body, refreshToken)
         if (!creds) {
             log("refresh_failed", {
                 source: "oauth",
                 error: "no access_token in response",
             })
-            return null
+            return "failed"
         }
-
         log("refresh_success", { source: "oauth" })
         return creds
     } catch (err) {
@@ -222,78 +243,76 @@ export function refreshViaOAuth(
             source: "oauth",
             error: err instanceof Error ? err.message : String(err),
         })
+        return "failed"
+    }
+}
+
+/**
+ * Let the Claude CLI refresh its own stored credentials by running one tiny
+ * headless prompt. Asynchronous and bounded by CLI_TIMEOUT_MS; resolves to
+ * whether the CLI exited successfully.
+ */
+async function refreshViaCli(): Promise<boolean> {
+    log("refresh_started", { source: "cli" })
+    // A shell on Windows resolves npm's `claude.cmd` shim; the command line is
+    // constant.
+    const child = spawn("claude", ["-p", ".", "--model", "haiku"], {
+        cwd: tmpdir(),
+        env: { ...process.env, TERM: "dumb" },
+        stdio: "ignore",
+        shell: process.platform === "win32",
+        timeout: CLI_TIMEOUT_MS,
+        windowsHide: true,
+    })
+    // Never keep pi alive just for a background refresh.
+    child.unref()
+    try {
+        const [code, signal] = await once(child, "exit")
+        if (code === 0) log("refresh_success", { source: "cli" })
+        else log("refresh_failed", { source: "cli", code, signal })
+        return code === 0
+    } catch (err) {
+        log("refresh_failed", {
+            source: "cli",
+            error: err instanceof Error ? err.message : String(err),
+        })
+        return false
+    }
+}
+
+function isFresh(creds: ClaudeCredentials): boolean {
+    return creds.expiresAt > Date.now() + 60_000
+}
+
+/** One refresh of `target`, spending `refreshToken`. Never rejects. */
+async function runRefresh(
+    target: ClaudeAccount,
+    refreshToken: string,
+): Promise<ClaudeCredentials | null> {
+    // Direct OAuth refresh first: zero LLM tokens consumed.
+    const oauth = await refreshViaOAuth(refreshToken)
+    if (typeof oauth === "object" && isFresh(oauth)) {
+        target.credentials = oauth
+        writeBackCredentials(target.source, oauth)
+        return oauth
+    }
+    if (oauth === "rejected") {
+        // The token is dead; the CLI would only spend tokens failing on it.
+        retryNotBefore.set(refreshToken, Number.POSITIVE_INFINITY)
+        log("refresh_exhausted", { source: target.source, reason: "rejected" })
         return null
     }
-}
 
-function refreshViaCli(): void {
-    const maxAttempts = 2
-    for (let i = 0; i < maxAttempts; i++) {
-        log("refresh_started", { source: "cli", attempt: i + 1 })
-        try {
-            execSync("claude -p . --model haiku", {
-                timeout: 60_000,
-                encoding: "utf-8",
-                env: { ...process.env, TERM: "dumb" },
-                stdio: "ignore",
-                cwd: tmpdir(),
-            })
-            log("refresh_success", { source: "cli" })
-            return
-        } catch (err) {
-            log("refresh_failed", {
-                source: "cli",
-                attempt: i + 1,
-                error: err instanceof Error ? err.message : String(err),
-            })
-            // Non-fatal: retry once, then give up
-        }
-    }
-}
-
-export function refreshIfNeeded(
-    account?: ClaudeAccount,
-): ClaudeCredentials | null {
-    const target = account ?? getActiveAccount()
-    if (!target) return null
-
-    // Pick up external updates to .credentials.json (e.g. the Claude CLI
-    // refreshing in another process). Bounded by getCachedCredentials's 30s
-    // TTL. macOS keychain sources stay on the in-memory path; their state is
-    // mutated only by our own writeBackCredentials.
-    if (target.source === "file") {
-        const onDisk = refreshAccount(target.source)
-        if (onDisk) target.credentials = onDisk
-    }
-
-    const creds = target.credentials
-    if (creds.expiresAt > Date.now() + 60_000) return creds
-
-    log("refresh_needed", {
-        source: target.source,
-        expiresAt: creds.expiresAt,
-        expiresIn: creds.expiresAt - Date.now(),
-    })
-
-    // Try direct OAuth refresh first (zero LLM tokens consumed)
-    if (creds.refreshToken) {
-        const oauthCreds = refreshViaOAuth(creds.refreshToken)
-        if (oauthCreds && oauthCreds.expiresAt > Date.now() + 60_000) {
-            target.credentials = oauthCreds
-            writeBackCredentials(target.source, oauthCreds)
-            return oauthCreds
-        }
-    }
-
-    // Fall back to CLI-based refresh (consumes Haiku tokens)
+    // Fall back to the Claude CLI (consumes Haiku tokens).
     log("refresh_fallback_cli", { source: target.source })
-    refreshViaCli()
+    await refreshViaCli()
     const refreshed = refreshAccount(target.source)
-    if (refreshed && refreshed.expiresAt > Date.now() + 60_000) {
+    if (refreshed && isFresh(refreshed)) {
         target.credentials = refreshed
         return refreshed
     }
 
+    retryNotBefore.set(refreshToken, Date.now() + RETRY_AFTER_FAILURE_MS)
     log("refresh_exhausted", {
         source: target.source,
         hadCredentials: !!refreshed,
@@ -303,36 +322,76 @@ export function refreshIfNeeded(
 }
 
 /**
- * Force a refresh of the active account's credentials and write the rotated
- * tokens back to storage. Used by pi's `oauth.refreshToken` hook, which is
- * invoked when the token stored in auth.json is at/near expiry.
+ * Return fresh credentials for `account` (default: the active account),
+ * refreshing them if needed. Never blocks the event loop.
  *
- * Re-reads the source first (the Claude CLI may have already rotated the
- * token), then falls back to a direct OAuth refresh.
+ * The stored credentials are re-read first: the Claude CLI may already have
+ * rotated them. Concurrent callers share one refresh per refresh token, and a
+ * refresh token that just failed is not retried (see RETRY_AFTER_FAILURE_MS),
+ * so an expired login costs one failed attempt, not one per pi request.
  */
-export function forceRefreshActiveCredentials(): ClaudeCredentials | null {
-    const account = getActiveAccount()
-    if (!account) return null
+export async function refreshIfNeeded(
+    account?: ClaudeAccount,
+): Promise<ClaudeCredentials | null> {
+    const target = account ?? getActiveAccount()
+    if (!target) return null
 
-    accountCacheMap.delete(account.source)
+    const onDisk = refreshAccount(target.source)
+    if (onDisk) target.credentials = onDisk
+    const creds = target.credentials
+    if (isFresh(creds)) return creds
 
-    // The on-disk/keychain source may already hold a fresher token.
-    const onDisk = refreshAccount(account.source)
-    if (onDisk) account.credentials = onDisk
-    if (account.credentials.expiresAt > Date.now() + 60_000) {
-        accountCacheMap.set(account.source, {
-            creds: account.credentials,
-            cachedAt: Date.now(),
+    const refreshToken = creds.refreshToken
+    if (!refreshToken) return null
+    const inFlight = refreshesInFlight.get(refreshToken)
+    if (inFlight) return inFlight
+    if ((retryNotBefore.get(refreshToken) ?? 0) > Date.now()) {
+        log("refresh_skipped", {
+            source: target.source,
+            reason: "recent failure",
         })
-        return account.credentials
+        return null
     }
 
-    const fresh = refreshIfNeeded(account)
+    log("refresh_needed", {
+        source: target.source,
+        expiresAt: creds.expiresAt,
+        expiresIn: creds.expiresAt - Date.now(),
+    })
+    const pending = runRefresh(target, refreshToken).finally(() => {
+        refreshesInFlight.delete(refreshToken)
+    })
+    refreshesInFlight.set(refreshToken, pending)
+    return pending
+}
+
+/**
+ * Refresh the active account's credentials, waiting at most REFRESH_WAIT_MS
+ * or until `signal` aborts. Used by pi's `oauth.refreshToken` hook, which pi
+ * invokes when the token in auth.json is at or near expiry. A refresh that
+ * outlasts the wait keeps running; its result is picked up on the next call.
+ */
+export async function forceRefreshActiveCredentials(
+    signal?: AbortSignal,
+): Promise<ClaudeCredentials | null> {
+    const account = getActiveAccount()
+    if (!account || signal?.aborted) return null
+    accountCacheMap.delete(account.source)
+
+    const waits = [AbortSignal.timeout(REFRESH_WAIT_MS)]
+    if (signal) waits.push(signal)
+    const stop = AbortSignal.any(waits)
+    const fresh = await Promise.race([
+        refreshIfNeeded(account),
+        once(stop, "abort").then(() => null),
+    ])
     if (fresh) {
         accountCacheMap.set(account.source, {
             creds: fresh,
             cachedAt: Date.now(),
         })
+    } else if (stop.aborted) {
+        log("refresh_wait_elapsed", { source: account.source })
     }
     return fresh
 }
@@ -347,7 +406,7 @@ export function getCredentialsForSync(): ClaudeCredentials | null {
     if (!account) return null
 
     const creds = account.credentials
-    if (creds.expiresAt > Date.now() + 60_000) {
+    if (isFresh(creds)) {
         return creds
     }
 
@@ -355,6 +414,14 @@ export function getCredentialsForSync(): ClaudeCredentials | null {
     return null
 }
 
+/**
+ * Synchronous access to the active account's credentials, for pi's
+ * synchronous `getApiKey` hook and extension startup.
+ *
+ * Never waits on the network or the Claude CLI: when the credentials are
+ * expired it re-reads them from storage, starts a background refresh, and
+ * returns null; the refreshed credentials are served once it lands.
+ */
 export function getCachedCredentials(): ClaudeCredentials | null {
     const account = getActiveAccount()
     if (!account) return null
@@ -364,7 +431,7 @@ export function getCachedCredentials(): ClaudeCredentials | null {
     if (
         cached &&
         now - cached.cachedAt < CREDENTIAL_CACHE_TTL_MS &&
-        cached.creds.expiresAt > now + 60_000
+        isFresh(cached.creds)
     ) {
         log("cache_hit", {
             source: account.source,
@@ -378,13 +445,18 @@ export function getCachedCredentials(): ClaudeCredentials | null {
         reason: cached ? "stale or expiring" : "empty",
     })
 
-    const fresh = refreshIfNeeded(account)
-    if (!fresh) {
-        log("credentials_unavailable", { source: account.source })
-        accountCacheMap.delete(account.source)
-        return null
+    const onDisk = refreshAccount(account.source)
+    if (onDisk) account.credentials = onDisk
+    if (isFresh(account.credentials)) {
+        accountCacheMap.set(account.source, {
+            creds: account.credentials,
+            cachedAt: now,
+        })
+        return account.credentials
     }
 
-    accountCacheMap.set(account.source, { creds: fresh, cachedAt: now })
-    return fresh
+    accountCacheMap.delete(account.source)
+    log("credentials_unavailable", { source: account.source })
+    void refreshIfNeeded(account)
+    return null
 }

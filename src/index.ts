@@ -18,7 +18,11 @@ import {
 } from "./credentials.ts"
 import { readAllClaudeAccounts, type ClaudeAccount } from "./keychain.ts"
 import { initLogger, log } from "./logger.ts"
-import { buildUserAgent } from "./signing.ts"
+import {
+    buildUserAgent,
+    detectInstalledCliVersion,
+    getCliVersion,
+} from "./signing.ts"
 import { injectBillingHeader } from "./transforms.ts"
 
 export {
@@ -101,6 +105,9 @@ function applyCredential(ctx: ExtensionContext): boolean {
  */
 const extension = async (pi: ExtensionAPI): Promise<void> => {
     initLogger()
+    // Runs while the credentials are read; awaited before the user-agent is
+    // fixed at provider registration.
+    const cliVersionDetected = detectInstalledCliVersion()
 
     let accounts: ClaudeAccount[] = []
     try {
@@ -230,6 +237,8 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
     // `claude-cli/<version>`, which Anthropic's plan-billing validation does
     // not accept — without this the request bills against extra usage instead
     // of the subscription plan.
+    const installedVersion = await cliVersionDetected
+    log("cli_version", { installed: installedVersion, using: getCliVersion() })
     pi.registerProvider(PROVIDER_ID, {
         oauth,
         headers: { "user-agent": buildUserAgent() },

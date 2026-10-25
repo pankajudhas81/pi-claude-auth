@@ -1,21 +1,81 @@
+import { execFile } from "node:child_process"
 import { createHash } from "node:crypto"
+import { promisify } from "node:util"
 
 const BILLING_SALT = "59cf53e54c78"
 
 // Claude Code CLI version used for the billing header AND the overridden
 // user-agent. The billing header's cc_version must match the user-agent
 // version for Anthropic's subscription-billing validation to route the request
-// to the Claude Pro/Max plan instead of pay-as-you-go / extra usage.
+// to the Claude Pro/Max plan instead of pay-as-you-go / extra usage, and
+// Anthropic rejects versions older than a per-model minimum
+// (`claude_code_version_too_old`, reported as 2.1.280 for newer models). This
+// is the floor: the installed `claude` version is used when it is newer.
 // Overridable via ANTHROPIC_CLI_VERSION.
-export const CC_VERSION = "2.1.160"
+export const CC_VERSION = "2.1.304"
 
 // Billing entrypoint, mirrored in the user-agent's `(external, <entrypoint>)`
 // suffix. Overridable via CLAUDE_CODE_ENTRYPOINT.
 export const CC_ENTRYPOINT = "sdk-cli"
 
-/** Resolve the Claude Code CLI version (env override wins). */
+/** Bound for `claude --version` at startup; a cold start takes about 0.5s. */
+const VERSION_TIMEOUT_MS = 3_000
+
+let installedVersion: string | null = null
+
+/**
+ * The `X.Y.Z` at the start of `claude --version` output, e.g.
+ * "2.1.304 (Claude Code)", or null for anything else. Only a well-formed
+ * version may reach the request headers.
+ */
+export function parseClaudeVersion(output: string): string | null {
+    const match = /^(\d+)\.(\d+)\.(\d+)(?=\s|$)/.exec(output.trim())
+    return match ? match[0] : null
+}
+
+/** Numeric comparison of two `X.Y.Z` versions. */
+export function compareVersions(a: string, b: string): number {
+    const pa = a.split(".").map(Number)
+    const pb = b.split(".").map(Number)
+    for (let i = 0; i < 3; i++) {
+        if (pa[i] !== pb[i]) return pa[i] - pb[i]
+    }
+    return 0
+}
+
+/**
+ * Read the installed Claude Code version once, at startup, so the user-agent
+ * (fixed when the provider is registered) and every billing header agree.
+ * Never rejects; without a usable `claude` the CC_VERSION floor is used.
+ */
+export async function detectInstalledCliVersion(): Promise<string | null> {
+    try {
+        // A shell on Windows resolves npm's `claude.cmd` shim; the command
+        // line is constant.
+        const { stdout } = await promisify(execFile)("claude", ["--version"], {
+            encoding: "utf-8",
+            timeout: VERSION_TIMEOUT_MS,
+            shell: process.platform === "win32",
+            windowsHide: true,
+        })
+        installedVersion = parseClaudeVersion(stdout)
+    } catch {
+        installedVersion = null
+    }
+    return installedVersion
+}
+
+/**
+ * Resolve the Claude Code CLI version: ANTHROPIC_CLI_VERSION if set,
+ * otherwise the newer of the installed `claude` version and CC_VERSION.
+ */
 export function getCliVersion(): string {
-    return process.env.ANTHROPIC_CLI_VERSION ?? CC_VERSION
+    const override = process.env.ANTHROPIC_CLI_VERSION
+    if (override) return override
+    if (installedVersion && compareVersions(installedVersion, CC_VERSION) > 0) {
+        return installedVersion
+    }
+    return CC_VERSION
 }
 
 /** Resolve the billing entrypoint (env override wins). */

@@ -117,26 +117,34 @@ or [@cortexkit/pi-anthropic-auth](https://pi.dev/packages/@cortexkit/pi-anthropi
 
 ## Supported models
 
-16 supported models. Run `pnpm run test:models` to verify against your account.
+The extension does not keep its own model list: `/model` shows pi's built-in
+Anthropic catalog. pi 1.4.0 ships these 17 models. Run `pnpm run test:models`
+to check which ones your subscription can use.
 
 | Model                      |
 | -------------------------- |
+| claude-fable-5             |
+| claude-fable-5-1           |
 | claude-haiku-4-5           |
 | claude-haiku-4-5-20251001  |
-| claude-opus-4-0            |
-| claude-opus-4-1            |
-| claude-opus-4-1-20250805   |
-| claude-opus-4-20250514     |
+| claude-haiku-5-5           |
 | claude-opus-4-5            |
 | claude-opus-4-5-20251101   |
 | claude-opus-4-6            |
 | claude-opus-4-7            |
 | claude-opus-4-8            |
-| claude-sonnet-4-0          |
-| claude-sonnet-4-20250514   |
+| claude-opus-5              |
+| claude-opus-5-5            |
 | claude-sonnet-4-5          |
 | claude-sonnet-4-5-20250929 |
 | claude-sonnet-4-6          |
+| claude-sonnet-5            |
+| claude-sonnet-5-5          |
+
+Newer models reject requests that claim an old Claude Code version
+(`claude_code_version_too_old`); see
+[Claude Code version](#claude-code-version). Models missing from `/model`
+need a newer pi: `npm install -g @earendil-works/pi-coding-agent@latest`.
 
 ## Credential sources
 
@@ -174,19 +182,16 @@ one account is found, the picker is skipped.
 | Keychain read timed out            | Restart Keychain Access (can happen on macOS Tahoe)                                                              |
 | Package not updating               | Run `pi update npm:@pankajudhas81/pi-claude-auth`                                                                |
 
-### Claude Code version pinning
+### Claude Code version
 
-The Claude Code version is pinned to `2.1.160` for billing header computation.
-If billing reverts to extra usage after a Claude Code update, override:
-
-```bash
-export ANTHROPIC_CLI_VERSION=<new-version>
-```
-
-or update the package:
+The billing header and user-agent carry a Claude Code version. At startup the
+extension reads `claude --version` and uses it when it is newer than its
+built-in floor, `2.1.304`; without a working `claude` on `PATH` it uses the
+floor. If billing reverts to extra usage or a model answers
+`claude_code_version_too_old`, update Claude Code or override:
 
 ```bash
-pi update npm:@pankajudhas81/pi-claude-auth
+export ANTHROPIC_CLI_VERSION=<version>
 ```
 
 ### Diagnostic logging
@@ -229,11 +234,11 @@ write-back is enabled by default to keep your stored credentials valid.
 
 ## Environment variables
 
-| Variable                | Description                                                             | Default       |
-| ----------------------- | ----------------------------------------------------------------------- | ------------- |
-| `PI_CODING_AGENT_DIR`   | pi's config directory (where `auth.json` lives)                         | `~/.pi/agent` |
-| `PI_CLAUDE_AUTH_DEBUG`  | Enable diagnostic logging (`1` for default path, or a custom file path) | disabled      |
-| `ANTHROPIC_CLI_VERSION` | Claude CLI version for billing headers                                  | `2.1.160`     |
+| Variable                | Description                                                             | Default                                |
+| ----------------------- | ----------------------------------------------------------------------- | -------------------------------------- |
+| `PI_CODING_AGENT_DIR`   | pi's config directory (where `auth.json` lives)                         | `~/.pi/agent`                          |
+| `PI_CLAUDE_AUTH_DEBUG`  | Enable diagnostic logging (`1` for default path, or a custom file path) | disabled                               |
+| `ANTHROPIC_CLI_VERSION` | Claude CLI version for billing headers                                  | installed `claude`, at least `2.1.304` |
 
 ## How it works
 

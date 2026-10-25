@@ -1,12 +1,19 @@
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { afterEach, test } from "node:test"
 import {
     buildBillingHeaderValue,
     buildUserAgent,
+    CC_VERSION,
     computeCch,
     computeVersionSuffix,
+    detectInstalledCliVersion,
     extractFirstUserMessageText,
+    getCliVersion,
+    parseClaudeVersion,
 } from "./signing.ts"
 
 const prevUa = process.env.ANTHROPIC_USER_AGENT
@@ -84,7 +91,10 @@ test("buildUserAgent: default Claude Code form", () => {
     delete process.env.ANTHROPIC_USER_AGENT
     delete process.env.ANTHROPIC_CLI_VERSION
     delete process.env.CLAUDE_CODE_ENTRYPOINT
-    assert.equal(buildUserAgent(), "claude-cli/2.1.160 (external, sdk-cli)")
+    assert.equal(
+        buildUserAgent(),
+        `claude-cli/${CC_VERSION} (external, sdk-cli)`,
+    )
 })
 
 test("buildUserAgent: honors version and entrypoint overrides", () => {
@@ -97,4 +107,55 @@ test("buildUserAgent: honors version and entrypoint overrides", () => {
 test("buildUserAgent: full override wins", () => {
     process.env.ANTHROPIC_USER_AGENT = "custom-agent/1.0"
     assert.equal(buildUserAgent(), "custom-agent/1.0")
+})
+
+test("parseClaudeVersion: takes only a well-formed leading version", () => {
+    assert.equal(parseClaudeVersion("2.1.310 (Claude Code)\n"), "2.1.310")
+    assert.equal(parseClaudeVersion("2.1.310"), "2.1.310")
+    assert.equal(parseClaudeVersion(""), null)
+    assert.equal(parseClaudeVersion("error: unknown option"), null)
+    assert.equal(parseClaudeVersion("2.1.310-evil\r\nx-injected: 1"), null)
+})
+
+/** Run `fn` with only a stub `claude` printing `output` on PATH. */
+async function withClaude(
+    output: string | null,
+    fn: () => Promise<void>,
+): Promise<void> {
+    const dir = mkdtempSync(join(tmpdir(), "pi-claude-auth-cli-"))
+    const prevPath = process.env.PATH
+    if (output !== null) {
+        const bin = join(dir, "claude")
+        writeFileSync(bin, `#!/bin/sh\necho '${output}'\n`)
+        chmodSync(bin, 0o755)
+    }
+    process.env.PATH = dir
+    try {
+        await fn()
+    } finally {
+        process.env.PATH = prevPath
+        rmSync(dir, { recursive: true, force: true })
+    }
+}
+
+test("getCliVersion: the installed claude wins only when newer than the floor", async (t) => {
+    if (process.platform === "win32") return t.skip("POSIX shell stub")
+    delete process.env.ANTHROPIC_CLI_VERSION
+
+    await withClaude("9.0.0 (Claude Code)", async () => {
+        assert.equal(await detectInstalledCliVersion(), "9.0.0")
+        assert.equal(getCliVersion(), "9.0.0")
+        process.env.ANTHROPIC_CLI_VERSION = "1.2.3"
+        assert.equal(getCliVersion(), "1.2.3")
+        delete process.env.ANTHROPIC_CLI_VERSION
+    })
+    // An outdated install would be rejected by newer models; keep the floor.
+    await withClaude("2.0.0 (Claude Code)", async () => {
+        assert.equal(await detectInstalledCliVersion(), "2.0.0")
+        assert.equal(getCliVersion(), CC_VERSION)
+    })
+    await withClaude(null, async () => {
+        assert.equal(await detectInstalledCliVersion(), null)
+        assert.equal(getCliVersion(), CC_VERSION)
+    })
 })

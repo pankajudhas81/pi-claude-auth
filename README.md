@@ -273,6 +273,9 @@ request fidelity (identity, beta flags, tool naming) for OAuth tokens.
     - `getApiKey` returns the freshest cached access token
 - Re-syncs `auth.json` every 5 minutes (sync never triggers a refresh; refresh
   is lazy, only when pi requests it or a request needs a fresh token)
+- Every `auth.json` update takes pi's own `auth.json.lock`, leaves other
+  providers' entries untouched, skips files it cannot parse instead of
+  rewriting them, and replaces the file atomically (temp file + rename)
 - pi's built-in Anthropic provider applies the Claude Code identity, beta flags,
   and tool-name conventions for OAuth tokens, so requests look like Claude Code
 - If credentials aren't OAuth-based or can't be read, the extension disables

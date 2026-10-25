@@ -1,13 +1,12 @@
 import { execFileSync, execSync } from "node:child_process"
-import {
-    chmodSync,
-    existsSync,
-    mkdirSync,
-    readFileSync,
-    writeFileSync,
-} from "node:fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import {
+    AuthLockBusyError,
+    setAuthJsonEntry,
+    type AuthJsonUpdate,
+} from "./auth-json.ts"
 import {
     readAllClaudeAccounts,
     refreshAccount,
@@ -88,53 +87,49 @@ export function saveAccountSource(source: string): void {
     }
 }
 
-function syncToPath(authPath: string, creds: ClaudeCredentials): void {
-    let auth: Record<string, unknown> = {}
-    if (existsSync(authPath)) {
-        const raw = readFileSync(authPath, "utf-8").trim()
-        if (raw) {
-            try {
-                auth = JSON.parse(raw)
-            } catch {
-                // Malformed file, start fresh
-            }
+/**
+ * Outcome of `syncAuthJson`:
+ * - `written`: the `anthropic` entry was updated;
+ * - `unchanged`: the entry already matched, nothing was written;
+ * - `locked`: another process held pi's auth.json lock, retried next sync;
+ * - `unreadable`: auth.json is not a JSON object and was left untouched;
+ * - `failed`: any other I/O error (logged).
+ */
+export type AuthSyncResult = AuthJsonUpdate | "locked" | "failed"
+
+/**
+ * Seed the Claude Code credentials into pi's auth.json as the `anthropic`
+ * entry, in the `{ type: "oauth", access, refresh, expires }` shape pi
+ * persists, so pi uses them with no separate /login.
+ *
+ * Best-effort and non-throwing: every caller retries on the next 5-minute
+ * sync, and skipping a sync is always safer than risking another provider's
+ * credentials.
+ */
+export function syncAuthJson(creds: ClaudeCredentials): AuthSyncResult {
+    const authPath = getAuthJsonPath()
+    let result: AuthSyncResult
+    try {
+        result = setAuthJsonEntry(authPath, "anthropic", {
+            type: "oauth",
+            access: creds.accessToken,
+            refresh: creds.refreshToken,
+            expires: creds.expiresAt,
+        })
+    } catch (err) {
+        if (err instanceof AuthLockBusyError) {
+            result = "locked"
+        } else {
+            log("sync_auth_json", {
+                path: authPath,
+                result: "failed",
+                error: err instanceof Error ? err.message : String(err),
+            })
+            return "failed"
         }
     }
-    // pi persists OAuth credentials as `{ type: "oauth", access, refresh,
-    // expires }` keyed by provider id. Seeding the `anthropic` entry lets pi
-    // use the Claude Code credentials with no separate /login.
-    auth.anthropic = {
-        type: "oauth",
-        access: creds.accessToken,
-        refresh: creds.refreshToken,
-        expires: creds.expiresAt,
-    }
-    const dir = dirname(authPath)
-    if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true, mode: 0o700 })
-    }
-    writeFileSync(authPath, JSON.stringify(auth, null, 2), {
-        encoding: "utf-8",
-        mode: 0o600,
-    })
-    if (process.platform !== "win32") {
-        chmodSync(authPath, 0o600)
-    }
-}
-
-export function syncAuthJson(creds: ClaudeCredentials): void {
-    const authPath = getAuthJsonPath()
-    try {
-        syncToPath(authPath, creds)
-        log("sync_auth_json", { path: authPath, success: true })
-    } catch (err) {
-        log("sync_auth_json", {
-            path: authPath,
-            success: false,
-            error: err instanceof Error ? err.message : String(err),
-        })
-        throw err
-    }
+    log("sync_auth_json", { path: authPath, result })
+    return result
 }
 
 export const OAUTH_TOKEN_URL = "https://claude.ai/v1/oauth/token"

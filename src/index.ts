@@ -25,6 +25,7 @@ export {
     getCachedCredentials,
     syncAuthJson,
     refreshAccountsList,
+    type AuthSyncResult,
     type ClaudeCredentials,
 } from "./credentials.ts"
 export { readAllClaudeAccounts, type ClaudeAccount } from "./keychain.ts"
@@ -150,13 +151,10 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
     }
 
     // Keep auth.json synced with current credentials (no refresh triggered).
+    // syncAuthJson never throws; a skipped sync is retried on the next tick.
     const syncTimer = setInterval(() => {
-        try {
-            const creds = getCredentialsForSync()
-            if (creds) syncAuthJson(creds)
-        } catch {
-            // Non-fatal
-        }
+        const creds = getCredentialsForSync()
+        if (creds) syncAuthJson(creds)
     }, SYNC_INTERVAL)
     syncTimer.unref()
 
@@ -199,18 +197,19 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
             setActiveAccountSource(chosen.source)
             saveAccountSource(chosen.source)
 
+            // pi persists the returned credentials to auth.json itself, under
+            // its auth.json lock.
             const creds = getCachedCredentials() ?? chosen.credentials
-            syncAuthJson(creds)
             log("login", { source: chosen.source, label: chosen.label })
             return toOAuthCreds(creds)
         },
 
         async refreshToken(credentials: OAuthCreds): Promise<OAuthCreds> {
+            // pi calls this while holding its auth.json lock and persists the
+            // returned credentials itself; syncing here would only contend
+            // for that lock.
             const fresh = forceRefreshActiveCredentials()
-            if (fresh) {
-                syncAuthJson(fresh)
-                return toOAuthCreds(fresh)
-            }
+            if (fresh) return toOAuthCreds(fresh)
             log("refresh_token_fallback", {
                 reason: "force refresh returned null",
             })

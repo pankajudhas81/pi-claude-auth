@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeEach, test } from "node:test"
+import { lockSync } from "proper-lockfile"
 import {
     loadPersistedAccountSource,
     parseOAuthResponse,
@@ -89,21 +90,29 @@ test("syncAuthJson: writes a pi oauth entry under anthropic", () => {
     })
 })
 
-test("syncAuthJson: preserves other providers in auth.json", () => {
+test("syncAuthJson: reports instead of throwing when it must skip", () => {
     const authPath = join(dir, "auth.json")
-    // Seed an unrelated provider, then sync anthropic on top of it.
-    writeFileSync(
-        authPath,
-        JSON.stringify({ openai: { type: "api_key", key: "sk-test" } }),
-        "utf-8",
-    )
-    syncAuthJson({ accessToken: "a2", refreshToken: "r2", expiresAt: 2 })
+    const creds = { accessToken: "a2", refreshToken: "r2", expiresAt: 2 }
+
+    writeFileSync(authPath, '{"openai": {"type": "api_key"', "utf-8")
+    assert.equal(syncAuthJson(creds), "unreadable")
+
+    writeFileSync(authPath, JSON.stringify({ openai: { type: "api_key" } }))
+    const release = lockSync(authPath, { realpath: false })
+    try {
+        assert.equal(syncAuthJson(creds), "locked")
+    } finally {
+        release()
+    }
+
+    assert.equal(syncAuthJson(creds), "written")
+    assert.equal(syncAuthJson(creds), "unchanged")
     const parsed = JSON.parse(readFileSync(authPath, "utf-8")) as {
         anthropic: { access: string }
-        openai: { type: string; key: string }
+        openai: { type: string }
     }
     assert.equal(parsed.anthropic.access, "a2")
-    assert.deepEqual(parsed.openai, { type: "api_key", key: "sk-test" })
+    assert.deepEqual(parsed.openai, { type: "api_key" })
 })
 
 test("account source persistence round-trips", () => {

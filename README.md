@@ -6,7 +6,7 @@ your existing Claude Code credentials — no separate login or API key needed.
 ## Quick start
 
 ```bash
-pi install npm:@pankajudhas81/pi-claude-auth
+pi install npm:pi-claude-auth
 ```
 
 Restart pi, pick a model with `/model` (or Ctrl+L). Done — your Claude Code
@@ -32,7 +32,7 @@ credentials are already seeded.
 ### Option A: pi package manager (recommended)
 
 ```bash
-pi install npm:@pankajudhas81/pi-claude-auth
+pi install npm:pi-claude-auth
 ```
 
 Installs the extension globally to `~/.pi/agent/npm/`. Use `-l` for a
@@ -44,7 +44,7 @@ Add to `~/.pi/agent/settings.json` (global) or `.pi/settings.json` (project):
 
 ```json
 {
-    "packages": ["npm:@pankajudhas81/pi-claude-auth@latest"]
+    "packages": ["npm:pi-claude-auth@latest"]
 }
 ```
 
@@ -62,7 +62,7 @@ https://raw.githubusercontent.com/pankajudhas81/pi-claude-auth/main/installation
 ### Updating
 
 ```bash
-pi update npm:@pankajudhas81/pi-claude-auth
+pi update npm:pi-claude-auth
 ```
 
 ## Verify it's working
@@ -76,7 +76,7 @@ pi config
 You should see the extension listed:
 
 ```
-npm:@pankajudhas81/pi-claude-auth (user)
+npm:pi-claude-auth (user)
   Extensions
     [x] src/index.ts
 ```
@@ -172,7 +172,7 @@ one account is found, the picker is skipped.
 | Not working on Linux/Windows       | Ensure `~/.claude/.credentials.json` exists. Run `claude` to create it                                           |
 | Keychain access denied             | Grant access when macOS prompts you                                                                              |
 | Keychain read timed out            | Restart Keychain Access (can happen on macOS Tahoe)                                                              |
-| Package not updating               | Run `pi update npm:@pankajudhas81/pi-claude-auth`                                                                |
+| Package not updating               | Run `pi update npm:pi-claude-auth`                                                                               |
 
 ### Claude Code version pinning
 
@@ -186,7 +186,7 @@ export ANTHROPIC_CLI_VERSION=<new-version>
 or update the package:
 
 ```bash
-pi update npm:@pankajudhas81/pi-claude-auth
+pi update npm:pi-claude-auth
 ```
 
 ### Diagnostic logging

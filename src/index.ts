@@ -208,7 +208,8 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
         async refreshToken(credentials: OAuthCreds): Promise<OAuthCreds> {
             const fresh = forceRefreshActiveCredentials()
             if (fresh) {
-                syncAuthJson(fresh)
+                // pi already holds its auth lock here and persists the returned
+                // credentials itself; calling syncAuthJson would contend on that lock.
                 return toOAuthCreds(fresh)
             }
             log("refresh_token_fallback", {

@@ -4,6 +4,11 @@ import {
     existsSync,
     mkdirSync,
     readFileSync,
+    realpathSync,
+    renameSync,
+    rmdirSync,
+    statSync,
+    unlinkSync,
     writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -88,45 +93,169 @@ export function saveAccountSource(source: string): void {
     }
 }
 
-function syncToPath(authPath: string, creds: ClaudeCredentials): void {
-    let auth: Record<string, unknown> = {}
-    if (existsSync(authPath)) {
-        const raw = readFileSync(authPath, "utf-8").trim()
-        if (raw) {
-            try {
-                auth = JSON.parse(raw)
-            } catch {
-                // Malformed file, start fresh
+// pi's async auth lock uses stale=30s and refreshes mtime every 15s, so never treat a
+// lock younger than 30s as stale.
+const AUTH_LOCK_STALE_MS = 30_000
+const AUTH_LOCK_WAIT_MS = 4_000
+
+function sleepSync(ms: number): void {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/** Acquire the same `<auth.json>.lock` directory lock pi (proper-lockfile) uses. */
+function acquireAuthLock(target: string): (() => void) | null {
+    const lockDir = `${target}.lock`
+    const deadline = Date.now() + AUTH_LOCK_WAIT_MS
+    for (;;) {
+        try {
+            mkdirSync(lockDir)
+            return () => {
+                try {
+                    rmdirSync(lockDir)
+                } catch {
+                    // already gone
+                }
             }
+        } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== "EEXIST") return null
+            let isStale = false
+            try {
+                isStale =
+                    Date.now() - statSync(lockDir).mtimeMs > AUTH_LOCK_STALE_MS
+            } catch {
+                // Lock was just released; retry immediately unless deadline passed.
+                if (Date.now() >= deadline) return null
+                continue
+            }
+            if (isStale) {
+                // Atomically claim the stale lock directory via rename so two racing
+                // reclaimers cannot rmdir a newly-acquired lock from the winner.
+                const staleTmp = `${lockDir}.stale.${process.pid}.${Math.random().toString(36).slice(2)}`
+                try {
+                    renameSync(lockDir, staleTmp)
+                    try {
+                        rmdirSync(staleTmp)
+                    } catch {
+                        // best effort
+                    }
+                    continue
+                } catch {
+                    // Another process beat us to reclaiming or releasing the lock.
+                }
+            }
+            if (Date.now() >= deadline) return null
+            sleepSync(10 + Math.random() * 25)
         }
     }
-    // pi persists OAuth credentials as `{ type: "oauth", access, refresh,
-    // expires }` keyed by provider id. Seeding the `anthropic` entry lets pi
-    // use the Claude Code credentials with no separate /login.
-    auth.anthropic = {
-        type: "oauth",
-        access: creds.accessToken,
-        refresh: creds.refreshToken,
-        expires: creds.expiresAt,
-    }
+}
+
+function syncToPath(authPath: string, creds: ClaudeCredentials): boolean {
     const dir = dirname(authPath)
     if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true, mode: 0o700 })
     }
-    writeFileSync(authPath, JSON.stringify(auth, null, 2), {
-        encoding: "utf-8",
-        mode: 0o600,
-    })
-    if (process.platform !== "win32") {
-        chmodSync(authPath, 0o600)
+    let target = authPath
+    try {
+        target = realpathSync(authPath)
+    } catch {
+        // file does not exist yet
+    }
+    const release = acquireAuthLock(target)
+    if (!release) {
+        log("sync_auth_json_skipped", { reason: "lock_busy" })
+        return false
+    }
+    try {
+        let auth: Record<string, unknown> = {}
+        if (existsSync(target)) {
+            const raw = readFileSync(target, "utf-8").trim()
+            if (!raw) {
+                log("sync_auth_json_skipped", { reason: "empty_auth_json" })
+                return false
+            }
+            let parsed: unknown
+            try {
+                parsed = JSON.parse(raw)
+            } catch {
+                parsed = undefined
+            }
+            if (
+                !parsed ||
+                typeof parsed !== "object" ||
+                Array.isArray(parsed)
+            ) {
+                log("sync_auth_json_skipped", {
+                    reason: "unparseable_auth_json",
+                })
+                return false
+            }
+            auth = parsed as Record<string, unknown>
+        }
+        const next = {
+            type: "oauth",
+            access: creds.accessToken,
+            refresh: creds.refreshToken,
+            expires: creds.expiresAt,
+        }
+        const cur = auth.anthropic as Record<string, unknown> | undefined
+        if (
+            cur &&
+            cur.type === next.type &&
+            cur.access === next.access &&
+            cur.refresh === next.refresh &&
+            cur.expires === next.expires
+        ) {
+            return true // unchanged: do not touch the file
+        }
+        auth.anthropic = next
+        const tmp = `${target}.${process.pid}.tmp`
+        const payload = JSON.stringify(auth, null, 2)
+        try {
+            writeFileSync(tmp, payload, {
+                encoding: "utf-8",
+                mode: 0o600,
+            })
+            try {
+                renameSync(tmp, target)
+            } catch (err) {
+                const code = (err as NodeJS.ErrnoException).code
+                if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") {
+                    throw err
+                }
+                // Windows: cannot replace a file another process holds open. We still hold the
+                // auth lock, so a plain in-place write is the best remaining option.
+                writeFileSync(target, payload, {
+                    encoding: "utf-8",
+                    mode: 0o600,
+                })
+            }
+        } finally {
+            if (existsSync(tmp)) {
+                try {
+                    unlinkSync(tmp)
+                } catch {
+                    // best effort
+                }
+            }
+        }
+        if (process.platform !== "win32") {
+            chmodSync(target, 0o600)
+        }
+        return true
+    } finally {
+        release()
     }
 }
 
 export function syncAuthJson(creds: ClaudeCredentials): void {
     const authPath = getAuthJsonPath()
     try {
-        syncToPath(authPath, creds)
-        log("sync_auth_json", { path: authPath, success: true })
+        const synced = syncToPath(authPath, creds)
+        log("sync_auth_json", {
+            path: authPath,
+            success: true,
+            skipped: !synced,
+        })
     } catch (err) {
         log("sync_auth_json", {
             path: authPath,
